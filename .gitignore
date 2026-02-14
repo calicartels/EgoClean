@@ -216,3 +216,6 @@ data/raw/**/*.tar
 data/raw/**/*
 !data/raw/.gitkeep
 
+
+data/
+
