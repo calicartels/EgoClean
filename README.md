@@ -12,4 +12,14 @@ The raw footage has several issues that break downstream processing. We tackle t
 
 **The problem:** Egocentric-10K uses wide-angle fisheye lenses (~128° FOV). Raw frames have severe barrel distortion — straight lines (table edges, shelves, tools) appear curved. Any model that assumes linear perspective (depth estimation, 3D tracking, ego-motion registration) will produce garbage if fed distorted frames. The rigid-body assumptions in later stages break when the geometry is wrong.
 
-**What we do:** Download the tar and intrinsics from HuggingFace, extract the MP4s, and rectify every frame in-memory using OpenCV's fisheye model (K, D from intrinsics.json). We never save undistorted video to disk — that would blow up storage. All downstream stages consume rectified frames through a single iter_frames() generator. check-rectify dumps a raw vs rectified pair to data/debug/ so you can visually confirm the fix.
+**What we do:** Download the tar and intrinsics from HuggingFace, extract the MP4s, rectify fisheye, and output only the corrected videos plus intrinsics. Tar, cache, and raw intermediates are deleted.
+
+## Run
+
+```bash
+pip install -r requirements.txt
+# HF_KEY in .env for gated dataset
+bash run.sh
+```
+
+Output: `data/factory_001/data_point_001.mp4`, `data_point_002.mp4`, `intrinsics.json`.

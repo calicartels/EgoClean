@@ -3,64 +3,106 @@ import re
 import sys
 import tarfile
 import shutil
-from pathlib import Path
+import cv2
 from huggingface_hub import hf_hub_download
 from dotenv import load_dotenv
 from tqdm import tqdm
 
 import config
+from rectify import iter_frames
+
+def is_done():
+    if not (config.OUT / "intrinsics.json").exists():
+        return False
+    for i in range(1, config.EXPECTED_CLIPS + 1):
+        if not (config.OUT / f"rectified_clip_{i}.mp4").exists():
+            return False
+    return True
 
 def download():
+    if config.TAR_PATH.exists():
+        return
     load_dotenv()
     token = os.getenv("HF_KEY")
-    config.RAW.mkdir(parents=True, exist_ok=True)
-    for fn in config.HF_FILES:
+    config.DATA.mkdir(parents=True, exist_ok=True)
+    for fn in tqdm(config.HF_FILES, desc="download"):
         hf_hub_download(
             repo_id=config.HF_REPO,
             filename=fn,
-            local_dir=config.RAW,
+            local_dir=config.DATA,
             repo_type="dataset",
             token=token,
         )
-    print(config.RAW)
 
-def rm_empty_dirs(p, stop_at):
-    if p.exists() and p.is_dir() and not any(p.iterdir()) and p != stop_at:
+def rm_empty(p, stop):
+    if p.exists() and p.is_dir() and not any(p.iterdir()) and p != stop:
         p.rmdir()
-        if p.parent != stop_at:
-            rm_empty_dirs(p.parent, stop_at)
-
-def parse_video_idx(name):
-    m = re.search(r"_(\d{5})\.mp4$", name)
-    return int(m.group(1)) if m else 0
+        if p.parent != stop:
+            rm_empty(p.parent, stop)
 
 def extract():
+    mp4s = list(config.EXTRACT_DIR.glob("*.mp4"))
+    if mp4s and config.INTRINSICS_PATH.exists():
+        return
     if not config.TAR_PATH.exists():
         sys.exit(1)
     config.EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
     with tarfile.open(config.TAR_PATH) as tar:
         members = [m for m in tar.getmembers() if m.name.endswith(".mp4")]
-        members.sort(key=lambda m: parse_video_idx(m.name))
-        if not members:
-            return
+        members.sort(key=lambda m: int(re.search(r"_(\d{5})\.mp4$", m.name).group(1)) if re.search(r"_(\d{5})\.mp4$", m.name) else 99999)
         for i, m in enumerate(tqdm(members, desc="extract"), start=1):
             f = tar.extractfile(m)
             if f:
                 (config.EXTRACT_DIR / f"data_point_{i:03d}.mp4").write_bytes(f.read())
     config.TAR_PATH.unlink()
-    rm_empty_dirs(config.TAR_PATH.parent, config.EXTRACT_DIR)
-    cache = config.RAW / ".cache"
+    src = config.TAR_PATH.parent / "intrinsics.json"
+    if src.exists():
+        shutil.copy(src, config.INTRINSICS_PATH)
+    rm_empty(config.TAR_PATH.parent, config.DATA)
+    cache = config.DATA / ".cache"
     if cache.exists():
         shutil.rmtree(cache)
-    print(config.EXTRACT_DIR)
+
+def rectify():
+    if is_done():
+        return
+    if not config.INTRINSICS_PATH.exists():
+        sys.exit(1)
+    config.OUT.mkdir(parents=True, exist_ok=True)
+    for i, mp4 in enumerate(tqdm(sorted(config.EXTRACT_DIR.glob("*.mp4")), desc="rectify"), start=1):
+        cap = cv2.VideoCapture(str(mp4))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        out = config.OUT / f"rectified_clip_{i}.mp4"
+        writer = cv2.VideoWriter(str(out), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        for frame in iter_frames(mp4, rectify=True):
+            writer.write(frame)
+        writer.release()
+    shutil.copy(config.INTRINSICS_PATH, config.OUT / "intrinsics.json")
+    shutil.rmtree(config.EXTRACT_DIR)
+    flatten_out()
+
+def flatten_out():
+    for p in config.OUT.iterdir():
+        if p.is_dir():
+            shutil.rmtree(p)
+        elif p.name.startswith("data_point_"):
+            p.unlink()
 
 cmd = sys.argv[1] if len(sys.argv) > 1 else "all"
 if cmd == "download":
     download()
 elif cmd == "extract":
     extract()
+elif cmd == "rectify":
+    rectify()
 elif cmd == "all":
+    if is_done():
+        flatten_out()
+        sys.exit(0)
     download()
     extract()
+    rectify()
 else:
     sys.exit(1)
