@@ -75,10 +75,10 @@ Idle segments have `active: false`, `objects: []`, `ecot: null`. Raw response is
 
 ```bash
 pip install -r requirements.txt
-# Set HF_KEY for HuggingFace. Use export so child processes inherit it:
-export HF_KEY=your_token
+# Set HF_TOKEN for HuggingFace (dataset download + model loading):
+export HF_TOKEN=your_token
 bash run.sh all
-# Or inline: HF_KEY=your_token bash run.sh all
+# Or inline: HF_TOKEN=your_token bash run.sh all
 ```
 
 Or step by step: Phase 1 (`download` → `extract` → `check-rectify`) then Phase 2 (`annotate`).

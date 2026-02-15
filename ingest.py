@@ -21,9 +21,9 @@ from config import (
 
 def download():
     load_dotenv()
-    token = os.getenv("HF_KEY")
+    token = os.getenv("HF_TOKEN") or os.getenv("HF_KEY")
     if not token:
-        raise ValueError("HF_KEY not set. Use .env or: export HF_KEY=your_token (or HF_KEY=token bash run.sh ...)")
+        raise ValueError("HF_TOKEN not set. Use: export HF_TOKEN=your_token")
     RAW.mkdir(parents=True, exist_ok=True)
     for f in HF_FILES:
         hf_hub_download(

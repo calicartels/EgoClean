@@ -1,4 +1,5 @@
 import json
+import re
 
 import cv2
 import torch
@@ -72,9 +73,26 @@ def parse_response(text):
     text = text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+    if "```" in text:
+        text = text.split("```")[0]
     if text.endswith("```"):
         text = text[:-3]
-    return json.loads(text.strip())
+    text = text.strip()
+
+    def try_parse(s):
+        s = re.sub(r",\s*([}\]])", r"\1", s)
+        return json.loads(s)
+
+    try:
+        return try_parse(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\[[\s\S]*\]", text)
+        if match:
+            try:
+                return try_parse(match.group(0))
+            except json.JSONDecodeError:
+                pass
+        raise
 
 
 def annotate_clip(frames, model, processor):
