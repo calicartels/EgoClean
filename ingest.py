@@ -23,10 +23,7 @@ def download():
     load_dotenv()
     token = os.getenv("HF_KEY")
     if not token:
-        raise ValueError("HF_KEY not set. Set HF_KEY in .env or run: HF_KEY=your_token bash run.sh ...")
-    if INTRINSICS_PATH.exists():
-        print("skip download: data already present")
-        return
+        raise ValueError("HF_KEY not set. Use .env or: export HF_KEY=your_token (or HF_KEY=token bash run.sh ...)")
     RAW.mkdir(parents=True, exist_ok=True)
     for f in HF_FILES:
         hf_hub_download(
@@ -40,9 +37,6 @@ def download():
 
 
 def extract():
-    if (TAR_DIR / f"{POC_CLIPS[0]}.mp4").exists():
-        print("skip extract: mp4s already present")
-        return
     tar_path = TAR_DIR / "part000.tar"
     members = [f"{base}.mp4" for base in POC_CLIPS] + [f"{base}.json" for base in POC_CLIPS]
     subprocess.run(["tar", "-xf", str(tar_path)] + members, cwd=TAR_DIR, check=True)
@@ -104,9 +98,6 @@ def iter_frames(video_path, K, D, calib_size, fps=None):
 
 
 def check_rectify():
-    if (DEBUG_DIR / "rectified.jpg").exists():
-        print("skip check-rectify: already done")
-        return
     K, D, calib_size = load_intrinsics(INTRINSICS_PATH)
     clip = POC_CLIPS[0]
     video_path = TAR_DIR / f"{clip}.mp4"
