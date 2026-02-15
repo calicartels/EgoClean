@@ -34,8 +34,42 @@ I'm targeting a single rented RTX 3090 on Vast.ai — 24 GB VRAM, ~$0.09–0.20/
 - **Phase 2:** Qwen2.5-VL-7B over whole clip as video (~13k input tokens); temporal action localization with `objects` array (0..N per segment). One call per clip.
 - **Output:** `data/annotate/{clip}_annotations.json` — action segments with natural boundaries, `objects` array for multi-object support
 - **Runtime:** ~1–3 min per clip on 3090 after model download (~14 GB for 7B, cached)
-- **Planned:** SAM 3 masking, SpaTracker 3D tracking, ego-motion cancellation, 6DoF extraction, BGTS filter — see `plan.md` for the full roadmap
-- **Caveat:** If Qwen returns malformed JSON (wraps it in extra text), the script crashes on purpose so we see the bad output and fix the prompt instead of silently dropping it
+
+### Qwen2.5-VL API: input and output
+
+**Input format:** Chat-style messages with mixed content. We pass a video (list of PIL images) and a text prompt:
+
+```python
+content = [
+    {"type": "video", "video": [pil_frame_0, pil_frame_1, ...], "sample_fps": 1.0},
+    {"type": "text", "text": PROMPT},
+]
+messages = [{"role": "user", "content": content}]
+```
+
+`qwen_vl_utils.process_vision_info(messages, return_video_kwargs=True)` extracts image/video tensors and video kwargs. The processor consumes these plus the chat template text. At 456×256 frames, 1 FPS, ~180 frames → ~13k visual tokens. Context window is 32k; we use ~42%.
+
+**Output format:** Raw autoregressive text. We ask for a JSON array; the model returns a string that we parse. Each segment:
+
+```json
+{
+  "action_id": 1,
+  "t_start_s": 5,
+  "t_end_s": 12,
+  "active": true,
+  "objects": [
+    {"object_name": "screwdriver", "bbox": [x1, y1, x2, y2], "rigid": true}
+  ],
+  "ecot": {
+    "scene": "...",
+    "subtask": "...",
+    "motion": "...",
+    "prediction": "..."
+  }
+}
+```
+
+Idle segments have `active: false`, `objects: []`, `ecot: null`. Raw response is saved to `{clip}_raw_response.txt` before parsing.
 
 ## Quick start
 
