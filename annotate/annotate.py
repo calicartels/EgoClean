@@ -1,5 +1,6 @@
 import json
 import re
+import sys
 
 import cv2
 import torch
@@ -69,6 +70,59 @@ def collect_frames(video_path, K, D, calib_size):
     return [to_pil(f) for _, _, f in iter_frames(video_path, K, D, calib_size, fps=ANNOTATE_FPS)]
 
 
+def _close_truncated_json(text):
+    """Attempt to close a truncated JSON array so we can salvage complete segments."""
+    # Strip any trailing incomplete key-value or comma
+    text = re.sub(r",\s*$", "", text.rstrip())
+    # Close any open braces/brackets
+    stack = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack:
+            stack.pop()
+    # Walk back to the last complete object — find last '}' that is part of the array
+    # and trim everything after it, then close the array.
+    last_brace = text.rfind("}")
+    if last_brace != -1:
+        text = text[:last_brace + 1]
+    # Recount what needs closing
+    stack = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack:
+            stack.pop()
+    text += "".join(reversed(stack))
+    return text
+
+
 def parse_response(text):
     text = text.strip()
     if text.startswith("```"):
@@ -92,6 +146,15 @@ def parse_response(text):
                 return try_parse(match.group(0))
             except json.JSONDecodeError:
                 pass
+        # Truncation recovery: try closing brackets to salvage complete segments
+        try:
+            repaired = _close_truncated_json(text)
+            result = try_parse(repaired)
+            print("WARNING: model output was truncated; salvaged"
+                  f" {len(result)} complete segments", file=sys.stderr)
+            return result
+        except (json.JSONDecodeError, Exception):
+            pass
         raise
 
 
@@ -99,7 +162,7 @@ def annotate_clip(frames, model, processor):
     # Choice: video with list of PIL frames + fps key for frame-list input.
     # Alternative was passing a file path — but that skips fisheye rectification.
     content = [
-        {"type": "video", "video": frames, "sample_fps": 1.0},
+        {"type": "video", "video": frames, "fps": 1.0},
         {"type": "text", "text": PROMPT},
     ]
     messages = [{"role": "user", "content": content}]
@@ -145,7 +208,7 @@ def run():
     for clip in POC_CLIPS:
         video_path = TAR_DIR / f"{clip}.mp4"
         if not video_path.exists():
-            print(f"skip {clip}: not found", file=__import__("sys").stderr)
+            print(f"skip {clip}: not found", file=sys.stderr)
             continue
         print(f"collecting rectified frames for {clip}...")
         frames = collect_frames(video_path, K, D, calib_size)

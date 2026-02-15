@@ -27,7 +27,7 @@ ANNOTATE_FPS = 1
 # At 456x256 frames the visual encoder overhead is small, so 7B fits.
 ANNOTATE_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-# Choice: max_new_tokens=2048 for full-clip action list with multi-object schema.
-# Alternative was 512 — too tight for 10-30 segments with objects arrays.
-# 4096 wastes time; 2048 covers ~30 detailed segments comfortably.
-MAX_NEW_TOKENS = 2048
+# Choice: max_new_tokens=4096 for full-clip action list with multi-object schema.
+# Alternative was 2048 — too tight when clips produce 15+ detailed segments with
+# ECoT fields, objects arrays, and bboxes; output truncates mid-JSON.
+MAX_NEW_TOKENS = 4096
