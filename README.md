@@ -18,11 +18,11 @@ The raw footage has several issues that break downstream processing. We tackle t
 
 ---
 
-## Phase 2: Semantic annotation with Qwen2.5-VL
+## Phase 2: Semantic annotation with Qwen2.5-VL-7B
 
 **The problem:** The footage is a mix of active manipulation (hands on objects, assembly, picking, placing) and non-manipulation (idle hands, walking between workstations, resting). We need to know *which* frames matter and *what* the worker is doing. The traditional approach uses Grounding DINO for hand/object detection, then merges consecutive active frames into segments — two models, two steps, more moving parts.
 
-**What we do:** Skip triage. Feed 5-second windows (5 frames at 1 FPS) directly to Qwen2.5-VL-7B. The VLM decides: active or idle? If active, it outputs object name, bounding box, rigid/non-rigid flag, and ECoT reasoning (scene, subtask, motion, prediction). One model does the job. Output goes to `data/annotate/{clip}_annotations.json` — structured JSON per window, ready for downstream masking and 3D tracking.
+**What we do:** Skip triage. Feed the entire clip as a video (rectified frames at 1 FPS, ~180 frames) to Qwen2.5-VL-7B in one call. The VLM does temporal action localization: it returns a list of action segments with start/end timestamps, natural boundaries (no arbitrary 5-second cuts splitting actions in half). Each segment has an `objects` array — empty for idle, one entry for single-object manipulation, multiple entries when the worker is assembling part A into part B. Each object has optional `object_name`, `bbox`, and `rigid` flag. ECoT reasoning (scene, subtask, motion, prediction) per segment. Output goes to `data/annotate/{clip}_annotations.json`. Raw model response saved to `{clip}_raw_response.txt` so if JSON parsing fails we see exactly what the model returned.
 
 ---
 
@@ -31,9 +31,9 @@ I'm targeting a single rented RTX 3090 on Vast.ai — 24 GB VRAM, ~$0.09–0.20/
 **TL;DR**
 
 - **Phase 1:** Download, extract, rectify fisheye in-memory. Fixes geometry so later stages don't drift.
-- **Phase 2:** Qwen2.5-VL-7B over 5-frame windows at 1 FPS; outputs active/idle, object name, bbox, ECoT. Replaces triage + merge with one VLM.
-- **Output:** `data/annotate/{clip}_annotations.json` — ~36 windows per clip, 72 total for 2 POC clips
-- **Runtime:** ~40–60 min on 3090 after model download (~14 GB for 7B, cached)
+- **Phase 2:** Qwen2.5-VL-7B over whole clip as video (~13k input tokens); temporal action localization with `objects` array (0..N per segment). One call per clip.
+- **Output:** `data/annotate/{clip}_annotations.json` — action segments with natural boundaries, `objects` array for multi-object support
+- **Runtime:** ~1–3 min per clip on 3090 after model download (~14 GB for 7B, cached)
 - **Planned:** SAM 3 masking, SpaTracker 3D tracking, ego-motion cancellation, 6DoF extraction, BGTS filter — see `plan.md` for the full roadmap
 - **Caveat:** If Qwen returns malformed JSON (wraps it in extra text), the script crashes on purpose so we see the bad output and fix the prompt instead of silently dropping it
 
@@ -41,7 +41,7 @@ I'm targeting a single rented RTX 3090 on Vast.ai — 24 GB VRAM, ~$0.09–0.20/
 
 ```bash
 pip install -r requirements.txt
-# Set HF_KEY in .env for HuggingFace download
+# Set HF_KEY in .env for HuggingFace download; run huggingface-cli login if needed
 bash run.sh all
 ```
 

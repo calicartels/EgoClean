@@ -16,20 +16,18 @@ DEBUG_DIR = DATA / "debug"
 
 ANNOTATE_DIR = DATA / "annotate"
 
-# Choice: 1 FPS for annotation windows.
-# Alternative was 2 FPS — doubles tokens per window for marginal temporal
-# resolution gain. Factory actions span seconds, 1 FPS captures transitions.
+# Choice: 1 FPS — feeds ~180 frames per clip (~13k visual tokens).
+# Alternative was 2 FPS (~26k tokens) — still fits 32k context but leaves less
+# headroom for the response and doubles ViT compute for marginal temporal gain.
 ANNOTATE_FPS = 1
 
-# Choice: 5-frame windows (5 seconds at 1 FPS).
-# Alternative was 3 frames — too few to see action start/end.
-# 10 frames would exceed Qwen2.5-VL's practical image throughput per call.
-WINDOW_SIZE = 5
-
-# Choice: Qwen2.5-VL-7B-Instruct in fp16 (~16 GB VRAM).
+# Choice: Qwen2.5-VL-7B-Instruct (~16 GB VRAM in fp16).
+# Alternative was 3B (~10 GB) — faster but weaker at multi-object reasoning
+# and temporal localization. 7B leaves ~8 GB headroom on 24 GB card.
+# At 456x256 frames the visual encoder overhead is small, so 7B fits.
 ANNOTATE_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-# Choice: max_new_tokens=512 for structured JSON response.
-# Alternative was 256 — too tight for ECoT reasoning chain.
-# 1024 wastes time on padding. 512 fits scene graph + reasoning + bbox.
-MAX_NEW_TOKENS = 512
+# Choice: max_new_tokens=2048 for full-clip action list with multi-object schema.
+# Alternative was 512 — too tight for 10-30 segments with objects arrays.
+# 4096 wastes time; 2048 covers ~30 detailed segments comfortably.
+MAX_NEW_TOKENS = 2048
