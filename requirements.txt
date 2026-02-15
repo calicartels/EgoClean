@@ -2,6 +2,3 @@ huggingface_hub>=0.20
 python-dotenv>=1.0
 opencv-python-headless>=4.8
 numpy>=1.24
-torch>=2.1
-transformers>=4.40
-pillow>=10.0
