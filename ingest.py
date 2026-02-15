@@ -23,7 +23,10 @@ def download():
     load_dotenv()
     token = os.getenv("HF_KEY")
     if not token:
-        raise ValueError("HF_KEY not set in .env")
+        raise ValueError("HF_KEY not set. Set HF_KEY in .env or run: HF_KEY=your_token bash run.sh ...")
+    if INTRINSICS_PATH.exists():
+        print("skip download: data already present")
+        return
     RAW.mkdir(parents=True, exist_ok=True)
     for f in HF_FILES:
         hf_hub_download(
@@ -37,6 +40,9 @@ def download():
 
 
 def extract():
+    if (TAR_DIR / f"{POC_CLIPS[0]}.mp4").exists():
+        print("skip extract: mp4s already present")
+        return
     tar_path = TAR_DIR / "part000.tar"
     members = [f"{base}.mp4" for base in POC_CLIPS] + [f"{base}.json" for base in POC_CLIPS]
     subprocess.run(["tar", "-xf", str(tar_path)] + members, cwd=TAR_DIR, check=True)
@@ -98,6 +104,9 @@ def iter_frames(video_path, K, D, calib_size, fps=None):
 
 
 def check_rectify():
+    if (DEBUG_DIR / "rectified.jpg").exists():
+        print("skip check-rectify: already done")
+        return
     K, D, calib_size = load_intrinsics(INTRINSICS_PATH)
     clip = POC_CLIPS[0]
     video_path = TAR_DIR / f"{clip}.mp4"
@@ -117,13 +126,14 @@ def check_rectify():
     print(f"saved raw.jpg and rectified.jpg to {DEBUG_DIR}")
 
 
-cmd = sys.argv[1] if len(sys.argv) > 1 else "download"
-if cmd == "download":
-    download()
-elif cmd == "extract":
-    extract()
-elif cmd == "check-rectify":
-    check_rectify()
-else:
-    print(f"unknown command: {cmd}")
-    sys.exit(1)
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "download"
+    if cmd == "download":
+        download()
+    elif cmd == "extract":
+        extract()
+    elif cmd == "check-rectify":
+        check_rectify()
+    else:
+        print(f"unknown command: {cmd}")
+        sys.exit(1)

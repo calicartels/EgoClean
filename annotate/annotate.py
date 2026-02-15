@@ -117,6 +117,10 @@ def annotate_clip(frames, model, processor):
 
 
 def run():
+    done = all((ANNOTATE_DIR / f"{c}_annotations.json").exists() for c in POC_CLIPS)
+    if done:
+        print("skip annotate: annotations already present")
+        return
     model, processor = load_model()
     K, D, calib_size = load_intrinsics(INTRINSICS_PATH)
     ANNOTATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -144,4 +148,5 @@ def run():
     torch.cuda.empty_cache()
 
 
-run()
+if __name__ == "__main__":
+    run()

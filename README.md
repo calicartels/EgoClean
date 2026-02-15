@@ -75,8 +75,8 @@ Idle segments have `active: false`, `objects: []`, `ecot: null`. Raw response is
 
 ```bash
 pip install -r requirements.txt
-# Set HF_KEY in .env for HuggingFace download; run huggingface-cli login if needed
-bash run.sh all
+# Set HF_KEY for HuggingFace (no .env needed on remote instances):
+HF_KEY=your_token bash run.sh all
 ```
 
-Or step by step: Phase 1 (`download` → `extract` → `check-rectify`) then Phase 2 (`annotate`).
+Or step by step: Phase 1 (`download` → `extract` → `check-rectify`) then Phase 2 (`annotate`). Each step skips if already done (e.g. data present, annotations exist).
