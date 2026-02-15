@@ -98,6 +98,9 @@ def annotate_clip(frames, model, processor):
         image_inputs, video_inputs = process_vision_info(messages)
         video_kwargs = {}
 
+    if "fps" in video_kwargs and isinstance(video_kwargs["fps"], list):
+        video_kwargs = {**video_kwargs, "fps": video_kwargs["fps"][0]}
+
     inputs = processor(
         text=[text],
         images=image_inputs,
