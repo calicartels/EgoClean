@@ -219,3 +219,9 @@ data/raw/**/*
 
 data/
 
+implementation/
+
+papers/
+
+
+.DS_Store

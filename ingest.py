@@ -1,129 +1,108 @@
-import json
 import os
-import subprocess
+import re
 import sys
-
+import tarfile
+import shutil
 import cv2
-import numpy as np
-from dotenv import load_dotenv
 from huggingface_hub import hf_hub_download
+from dotenv import load_dotenv
+from tqdm import tqdm
 
-from config import (
-    RAW,
-    HF_REPO,
-    HF_FILES,
-    TAR_DIR,
-    POC_CLIPS,
-    INTRINSICS_PATH,
-    DEBUG_DIR,
-)
+import config
+from rectify import iter_frames
 
+def is_done():
+    if not (config.OUT / "intrinsics.json").exists():
+        return False
+    for i in range(1, config.EXPECTED_CLIPS + 1):
+        if not (config.OUT / f"rectified_clip_{i}.mp4").exists():
+            return False
+    return True
 
 def download():
+    if config.TAR_PATH.exists():
+        return
     load_dotenv()
     token = os.getenv("HF_KEY")
-    if not token:
-        raise ValueError("HF_KEY not set in .env")
-    RAW.mkdir(parents=True, exist_ok=True)
-    for f in HF_FILES:
+    config.DATA.mkdir(parents=True, exist_ok=True)
+    for fn in tqdm(config.HF_FILES, desc="download"):
         hf_hub_download(
-            repo_id=HF_REPO,
-            filename=f,
-            local_dir=RAW,
+            repo_id=config.HF_REPO,
+            filename=fn,
+            local_dir=config.DATA,
             repo_type="dataset",
             token=token,
         )
-    print(f"downloaded to {RAW}")
 
+def rm_empty(p, stop):
+    if p.exists() and p.is_dir() and not any(p.iterdir()) and p != stop:
+        p.rmdir()
+        if p.parent != stop:
+            rm_empty(p.parent, stop)
 
 def extract():
-    tar_path = TAR_DIR / "part000.tar"
-    members = [f"{base}.mp4" for base in POC_CLIPS] + [f"{base}.json" for base in POC_CLIPS]
-    subprocess.run(["tar", "-xf", str(tar_path)] + members, cwd=TAR_DIR, check=True)
-    tar_path.unlink()
-    print(f"extracted to {TAR_DIR}")
+    mp4s = list(config.EXTRACT_DIR.glob("*.mp4"))
+    if mp4s and config.INTRINSICS_PATH.exists():
+        return
+    if not config.TAR_PATH.exists():
+        sys.exit(1)
+    config.EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(config.TAR_PATH) as tar:
+        members = [m for m in tar.getmembers() if m.name.endswith(".mp4")]
+        members.sort(key=lambda m: int(re.search(r"_(\d{5})\.mp4$", m.name).group(1)) if re.search(r"_(\d{5})\.mp4$", m.name) else 99999)
+        for i, m in enumerate(tqdm(members, desc="extract"), start=1):
+            f = tar.extractfile(m)
+            if f:
+                (config.EXTRACT_DIR / f"data_point_{i:03d}.mp4").write_bytes(f.read())
+    config.TAR_PATH.unlink()
+    src = config.TAR_PATH.parent / "intrinsics.json"
+    if src.exists():
+        shutil.copy(src, config.INTRINSICS_PATH)
+    rm_empty(config.TAR_PATH.parent, config.DATA)
+    cache = config.DATA / ".cache"
+    if cache.exists():
+        shutil.rmtree(cache)
 
+def rectify():
+    if is_done():
+        return
+    if not config.INTRINSICS_PATH.exists():
+        sys.exit(1)
+    config.OUT.mkdir(parents=True, exist_ok=True)
+    for i, mp4 in enumerate(tqdm(sorted(config.EXTRACT_DIR.glob("*.mp4")), desc="rectify"), start=1):
+        cap = cv2.VideoCapture(str(mp4))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        out = config.OUT / f"rectified_clip_{i}.mp4"
+        writer = cv2.VideoWriter(str(out), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        for frame in iter_frames(mp4, rectify=True):
+            writer.write(frame)
+        writer.release()
+    shutil.copy(config.INTRINSICS_PATH, config.OUT / "intrinsics.json")
+    shutil.rmtree(config.EXTRACT_DIR)
+    flatten_out()
 
-def load_intrinsics(path):
-    raw = json.loads(path.read_text())
-    K = np.array([
-        [raw["fx"], 0.0, raw["cx"]],
-        [0.0, raw["fy"], raw["cy"]],
-        [0.0, 0.0, 1.0],
-    ])
-    D = np.array([raw["k1"], raw["k2"], raw["k3"], raw["k4"]])
-    calib_size = (raw["image_width"], raw["image_height"])
-    return K, D, calib_size
+def flatten_out():
+    for p in config.OUT.iterdir():
+        if p.is_dir():
+            shutil.rmtree(p)
+        elif p.name.startswith("data_point_"):
+            p.unlink()
 
-
-def scale_intrinsics(K, calib_size, frame_size):
-    sx = frame_size[0] / calib_size[0]
-    sy = frame_size[1] / calib_size[1]
-    K_scaled = K.copy()
-    K_scaled[0, 0] *= sx
-    K_scaled[0, 2] *= sx
-    K_scaled[1, 1] *= sy
-    K_scaled[1, 2] *= sy
-    return K_scaled
-
-
-def iter_frames(video_path, K, D, calib_size, fps=None):
-    cap = cv2.VideoCapture(str(video_path))
-    src_fps = cap.get(cv2.CAP_PROP_FPS)
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    frame_size = (w, h)
-
-    K_use = scale_intrinsics(K, calib_size, frame_size) if frame_size != calib_size else K
-
-    map1, map2 = cv2.fisheye.initUndistortRectifyMap(
-        K_use, D, np.eye(3), K_use, frame_size, cv2.CV_16SC2,
-    )
-
-    step_ms = (1000.0 / fps) if fps else (1000.0 / src_fps)
-    next_ms = 0.0
-    idx = 0
-
-    while True:
-        cap.set(cv2.CAP_PROP_POS_MSEC, next_ms)
-        ret, frame = cap.read()
-        if not ret:
-            break
-        rect = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
-        yield idx, next_ms, rect
-        idx += 1
-        next_ms += step_ms
-
-    cap.release()
-
-
-def check_rectify():
-    K, D, calib_size = load_intrinsics(INTRINSICS_PATH)
-    clip = POC_CLIPS[0]
-    video_path = TAR_DIR / f"{clip}.mp4"
-
-    cap = cv2.VideoCapture(str(video_path))
-    ret, raw_frame = cap.read()
-    cap.release()
-    if not ret:
-        raise RuntimeError(f"cannot read {video_path}")
-
-    gen = iter_frames(video_path, K, D, calib_size, fps=1)
-    _, _, rect_frame = next(gen)
-
-    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(DEBUG_DIR / "raw.jpg"), raw_frame)
-    cv2.imwrite(str(DEBUG_DIR / "rectified.jpg"), rect_frame)
-    print(f"saved raw.jpg and rectified.jpg to {DEBUG_DIR}")
-
-
-cmd = sys.argv[1] if len(sys.argv) > 1 else "download"
+cmd = sys.argv[1] if len(sys.argv) > 1 else "all"
 if cmd == "download":
     download()
 elif cmd == "extract":
     extract()
-elif cmd == "check-rectify":
-    check_rectify()
+elif cmd == "rectify":
+    rectify()
+elif cmd == "all":
+    if is_done():
+        flatten_out()
+        sys.exit(0)
+    download()
+    extract()
+    rectify()
 else:
-    print(f"unknown command: {cmd}")
     sys.exit(1)
