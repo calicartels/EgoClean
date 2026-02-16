@@ -1,5 +1,6 @@
 import os
 import re
+import subprocess
 import sys
 import tarfile
 import shutil
@@ -34,12 +35,6 @@ def download():
             token=token,
         )
 
-def rm_empty(p, stop):
-    if p.exists() and p.is_dir() and not any(p.iterdir()) and p != stop:
-        p.rmdir()
-        if p.parent != stop:
-            rm_empty(p.parent, stop)
-
 def extract():
     mp4s = list(config.EXTRACT_DIR.glob("*.mp4"))
     if mp4s and config.INTRINSICS_PATH.exists():
@@ -58,7 +53,9 @@ def extract():
     src = config.TAR_PATH.parent / "intrinsics.json"
     if src.exists():
         shutil.copy(src, config.INTRINSICS_PATH)
-    rm_empty(config.TAR_PATH.parent, config.DATA)
+    workers_dir = config.TAR_PATH.parent.parent  # factory_001/workers
+    if workers_dir.exists():
+        shutil.rmtree(workers_dir)
     cache = config.DATA / ".cache"
     if cache.exists():
         shutil.rmtree(cache)
@@ -75,10 +72,19 @@ def rectify():
         w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cap.release()
         out = config.OUT / f"rectified_clip_{i}.mp4"
-        writer = cv2.VideoWriter(str(out), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        proc = subprocess.Popen(
+            [
+                "ffmpeg", "-y",
+                "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
+                "-c:v", "libx264", "-crf", str(config.VIDEO_CRF), "-preset", "medium", "-pix_fmt", "yuv420p",
+                str(out),
+            ],
+            stdin=subprocess.PIPE,
+        )
         for frame in iter_frames(mp4, rectify=True):
-            writer.write(frame)
-        writer.release()
+            proc.stdin.write(frame.tobytes())
+        proc.stdin.close()
+        proc.wait()
     shutil.copy(config.INTRINSICS_PATH, config.OUT / "intrinsics.json")
     shutil.rmtree(config.EXTRACT_DIR)
     flatten_out()
