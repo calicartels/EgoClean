@@ -14,12 +14,26 @@ The raw footage has several issues that break downstream processing. We tackle t
 
 **What we do:** Download the tar and intrinsics from HuggingFace, extract the MP4s, rectify fisheye, and output only the corrected videos plus intrinsics. Tar, cache, and raw intermediates are deleted.
 
+## Phase 2: Temporal structure via V-JEPA 2
+
+**The problem:** We need to know when things happen — where action cycles start and end, which segments are repetitive, and which look anomalous. Before spending money on semantic VLMs, we want a cheap structural pass that reveals the temporal patterns in the video.
+
+**What we do:** Slide a 64-frame V-JEPA 2 window (ViT-L, 1024-dim) across each rectified clip at 1-second stride. Mean-pool patch tokens into one embedding per window. Save embeddings as .npy. Then compute consecutive cosine distance (temporal change signal), self-similarity matrix, and autocorrelation to detect repeating structure.
+
 ## Run
 
 ```bash
+# Phase 1 (local or GPU instance)
 pip install -r requirements.txt
 # HF_KEY in .env for gated dataset
 bash run.sh
+
+# Phase 2 (Vast.ai RTX 3090)
+pip install -r requirements.txt
+python VJEPA/encode.py
+python VJEPA/analyze.py
 ```
 
-Output: `data/factory_001/data_point_001.mp4`, `data_point_002.mp4`, `intrinsics.json`.
+Phase 1 output: `data/factory_001/rectified_clip_1.mp4`, `rectified_clip_2.mp4`, `intrinsics.json`.
+
+Phase 2 output: `data/factory_001/rectified_clip_*_emb.npy`, `*_ts.npy`, `*_diagnostics.png`.
