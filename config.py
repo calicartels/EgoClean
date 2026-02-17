@@ -24,16 +24,24 @@ VJEPA_WINDOW = 64
 VJEPA_STRIDE_SEC = 1.0
 VJEPA_RESIZE = 256
 
-# ViT-L fpc64-256 patch layout: 8192 total = 32 temporal × 256 spatial.
-# 32 temporal: 64 input frames / 2 (tubelet temporal stride) = 32.
-# 256 spatial: (256/16)² = 16×16 = 256 patches per frame.
+# ViT-L fpc64-256 patch layout: 8192 total = 32 temporal x 256 spatial.
 VJEPA_T_PATCHES = 32
 VJEPA_S_PATCHES = 256
 
 # Anomaly detection
-# Choice: mean - 2*std. Adaptive across clips. Alternative: fixed threshold (0.85).
-ANOMALY_N_STD = 2.0
-# Merge anomalies within 5s. Alternative: 2s (tighter) or 10s (merge separate events).
+
+# Choice: 10th percentile of row-mean similarity. Flags windows whose average
+# similarity to all others is in the bottom 10%. Nonparametric — adapts per clip.
+# Alternative: mean-2*std on consecutive similarity (failed — signal too noisy,
+# threshold too low, nothing flagged). Or fixed threshold (doesn't generalize).
+ANOMALY_PERCENTILE = 10
+
+# Choice: merge anomalies within 5s. A brief return to "normal" mid-transit
+# (e.g. worker glances at workstation while walking) shouldn't split one event.
+# Alternative: 2s (tighter, more fragments) or 10s (risks merging separate events).
 ANOMALY_MIN_GAP = 5.0
-# Discard anomalies shorter than 3s. Alternative: 1s (more FP) or 5s (miss brief events).
+
+# Choice: discard anomalies shorter than 3s. Head turns and glances cause
+# 1-2s similarity dips that aren't real departures from work.
+# Alternative: 1s (catches more, more false positives) or 5s (misses brief events).
 ANOMALY_MIN_DUR = 3.0

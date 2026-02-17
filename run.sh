@@ -3,3 +3,4 @@ python ingest.py "${1:-all}"
 python VJEPA/encode.py
 python VJEPA/detect.py
 python VJEPA/analyze.py
+python QWEN/label.py

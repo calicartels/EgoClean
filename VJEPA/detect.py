@@ -5,28 +5,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
+from tqdm import tqdm
 import config
+from VJEPA.utils import load_clip, sim_matrix, sim_matrix_mean, row_mean_score, fmt
 
 
-def load_clip(clip_idx):
-    stem = f"rectified_clip_{clip_idx}"
-    emb = np.load(config.OUT / f"{stem}_emb.npy")
-    ts = np.load(config.OUT / f"{stem}_ts.npy")
-    temb_path = config.OUT / f"{stem}_temb.npy"
-    temb = np.load(temb_path) if temb_path.exists() else None
-    return emb, temb, ts
+def find_anomalies(score, ts, percentile, min_gap, min_dur):
+    # Choice: percentile-based threshold. Nonparametric, adapts per clip.
+    # Alternative: mean-k*std (failed on consecutive sim), fixed threshold.
+    threshold = np.percentile(score, percentile)
+    low = score < threshold
 
-
-def diagonal_similarity(temb):
-    n = temb.shape[0]
-    flat = temb.reshape(n, -1)
-    norms = np.linalg.norm(flat, axis=1, keepdims=True)
-    normed = flat / norms
-    return np.sum(normed[:-1] * normed[1:], axis=1)
-
-
-def find_anomalies(sim, ts, threshold, min_gap, min_dur):
-    low = sim < threshold
     spans = []
     start = None
     for i, is_low in enumerate(low):
@@ -54,53 +43,42 @@ def find_anomalies(sim, ts, threshold, min_gap, min_dur):
                 "end_sec": round(float(ts[min(e, len(ts) - 1)]), 1),
                 "start_idx": int(s),
                 "end_idx": int(e),
-                "mean_sim": round(float(sim[s:e].mean()), 3),
+                "mean_score": round(float(score[s:e].mean()), 4),
             })
-    return result
+    return result, threshold
 
 
-def fmt_time(sec):
-    m, s = divmod(int(sec), 60)
-    return f"{m:02d}:{s:02d}"
-
-
+clip_indices = [i for i in range(1, config.EXPECTED_CLIPS + 1)
+                if (config.OUT / f"rectified_clip_{i}_emb.npy").exists()]
+if not clip_indices:
+    print("no embeddings found, run encode.py first")
+    sys.exit(1)
 results = {}
-for i in range(1, config.EXPECTED_CLIPS + 1):
-    path = config.OUT / f"rectified_clip_{i}_emb.npy"
-    if not path.exists():
-        continue
+for i in tqdm(clip_indices, desc="detect", unit="clip"):
     emb, temb, ts = load_clip(i)
     name = f"rectified_clip_{i}"
 
-    if temb is not None:
-        sim = diagonal_similarity(temb)
-    else:
-        norms = np.linalg.norm(emb, axis=1, keepdims=True)
-        normed = emb / norms
-        sim = np.sum(normed[:-1] * normed[1:], axis=1)
+    S = sim_matrix(temb) if temb is not None else sim_matrix_mean(emb)
+    score = row_mean_score(S)
 
-    # Choice: mean - 2*std. Adaptive across clips with different baseline similarity.
-    # Alternative: fixed threshold (e.g. 0.85).
-    threshold = float(sim.mean() - config.ANOMALY_N_STD * sim.std())
-
-    anomalies = find_anomalies(
-        sim, ts,
-        threshold=threshold,
+    anomalies, threshold = find_anomalies(
+        score, ts,
+        percentile=config.ANOMALY_PERCENTILE,
         min_gap=config.ANOMALY_MIN_GAP,
         min_dur=config.ANOMALY_MIN_DUR,
     )
 
     results[name] = {
-        "threshold": round(threshold, 4),
-        "sim_mean": round(float(sim.mean()), 4),
-        "sim_std": round(float(sim.std()), 4),
+        "threshold": round(float(threshold), 4),
+        "score_mean": round(float(score.mean()), 4),
+        "score_std": round(float(score.std()), 4),
         "anomalies": anomalies,
     }
 
     print(f"{name}: threshold={threshold:.4f}, {len(anomalies)} anomalies")
     for a in anomalies:
-        print(f"  {fmt_time(a['start_sec'])}–{fmt_time(a['end_sec'])}  "
-              f"({a['start_sec']}–{a['end_sec']}s, sim={a['mean_sim']:.3f})")
+        print(f"  {fmt(a['start_sec'])}-{fmt(a['end_sec'])}  "
+              f"({a['start_sec']}-{a['end_sec']}s, score={a['mean_score']:.4f})")
 
 out_path = config.OUT / "anomalies.json"
 with open(out_path, "w") as f:
