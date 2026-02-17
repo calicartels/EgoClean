@@ -28,20 +28,10 @@ VJEPA_RESIZE = 256
 VJEPA_T_PATCHES = 32
 VJEPA_S_PATCHES = 256
 
-# Anomaly detection
-
-# Choice: 10th percentile of row-mean similarity. Flags windows whose average
-# similarity to all others is in the bottom 10%. Nonparametric — adapts per clip.
-# Alternative: mean-2*std on consecutive similarity (failed — signal too noisy,
-# threshold too low, nothing flagged). Or fixed threshold (doesn't generalize).
-ANOMALY_PERCENTILE = 10
-
-# Choice: merge anomalies within 5s. A brief return to "normal" mid-transit
-# (e.g. worker glances at workstation while walking) shouldn't split one event.
-# Alternative: 2s (tighter, more fragments) or 10s (risks merging separate events).
-ANOMALY_MIN_GAP = 5.0
-
-# Choice: discard anomalies shorter than 3s. Head turns and glances cause
-# 1-2s similarity dips that aren't real departures from work.
-# Alternative: 1s (catches more, more false positives) or 5s (misses brief events).
-ANOMALY_MIN_DUR = 3.0
+# Anomaly detection — hysteresis (LAPS-style). Signal: 1 - row_mean_similarity.
+DETECT_EMA_ALPHA = 0.15
+DETECT_THETA_ON = None  # None = Otsu auto, else float override
+DETECT_HYSTERESIS_RATIO = 0.6
+DETECT_DEBOUNCE_ON = 3
+DETECT_DEBOUNCE_OFF = 3
+DETECT_MIN_DUR = 3.0
