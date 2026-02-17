@@ -14,8 +14,6 @@ import config
 
 
 def read_frames(video_path):
-    # Choice: torchcodec. Matches V-JEPA 2's tested input path — outputs
-
     vr = VideoDecoder(str(video_path))
     fps = vr.metadata.average_fps or 30
     n_frames = vr.metadata.num_frames
@@ -57,7 +55,7 @@ def encode_clip(frames, fps, processor, model, device):
 
     # Choice: batch_size=1 per window. Simple, ~0.3 sec/window on 3090.
     # Alternative: batch=4-8 would be ~2x faster but adds padding logic.
-    for i in tqdm(range(n_windows), desc="encode"):
+    for i in tqdm(range(n_windows), desc="encode", unit="win"):
         start = i * stride
         clip = frames[start : start + config.VJEPA_WINDOW]  # (64, C, H, W) uint8
 
@@ -90,7 +88,7 @@ print(f"loading {config.VJEPA_REPO}")
 processor, model, device = load_model()
 print(f"  device: {device}")
 
-for clip_path in clips:
+for clip_path in tqdm(clips, desc="clips", unit="clip"):
     print(f"\n{clip_path.name}")
     frames, fps = read_frames(clip_path)
     print(f"  {len(frames)} frames, {fps:.1f} fps")

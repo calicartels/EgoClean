@@ -4,6 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
+from tqdm import tqdm
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -78,7 +79,7 @@ def plot_diagnostics(emb, ts, name):
 
 
 found = False
-for i in range(1, config.EXPECTED_CLIPS + 1):
+for i in tqdm(range(1, config.EXPECTED_CLIPS + 1), desc="analyze", unit="clip"):
     path = config.OUT / f"rectified_clip_{i}_emb.npy"
     if not path.exists():
         continue

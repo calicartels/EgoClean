@@ -73,6 +73,7 @@ def rectify():
         cap = cv2.VideoCapture(str(mp4))
         fps = cap.get(cv2.CAP_PROP_FPS) or 30
         w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
         cap.release()
         out = config.OUT / f"rectified_clip_{i}.mp4"
         proc = subprocess.Popen(
@@ -84,7 +85,7 @@ def rectify():
             ],
             stdin=subprocess.PIPE,
         )
-        for frame in iter_frames(mp4, rectify=True):
+        for frame in tqdm(iter_frames(mp4, rectify=True), total=n_frames, desc=f"  clip {i}", unit="fr"):
             proc.stdin.write(frame.tobytes())
         proc.stdin.close()
         proc.wait()
