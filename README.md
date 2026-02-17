@@ -23,16 +23,12 @@ The raw footage has several issues that break downstream processing. We tackle t
 ## Run
 
 ```bash
-# Phase 1 (local or GPU instance)
 pip install -r requirements.txt
 # HF_KEY in .env for gated dataset
 bash run.sh
-
-# Phase 2 (Vast.ai RTX 3090)
-pip install -r requirements.txt
-python VJEPA/encode.py
-python VJEPA/analyze.py
 ```
+
+Runs Phase 1 (ingest + rectify) then Phase 2 (V-JEPA encode + analyze). Phase 2 needs GPU for speed; falls back to CPU/MPS if unavailable.
 
 Phase 1 output: `data/factory_001/rectified_clip_1.mp4`, `rectified_clip_2.mp4`, `intrinsics.json`.
 
