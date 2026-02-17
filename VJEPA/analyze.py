@@ -10,12 +10,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 import config
-from VJEPA.utils import load_clip, sim_matrix, sim_matrix_mean, row_mean_score
-
-# Choice: inferno — high contrast at the 0.6-0.9 similarity range where our data lives.
-# Alternative: viridis (default, washes out in that range), plasma (similar to inferno
-# but worse at extremes), magma (too dark for the matrix background).
-CMAP = "inferno"
+from VJEPA.utils import load_clip, sim_matrix, sim_matrix_mean
 
 
 def cosine_dist(emb):
@@ -25,68 +20,66 @@ def cosine_dist(emb):
     return 1.0 - dots / norms
 
 
-def autocorr(x, max_lag=None):
-    x = x - x.mean()
-    if max_lag is None:
-        max_lag = len(x) // 2
+def autocorr(signal):
+    x = signal - signal.mean()
     result = np.correlate(x, x, mode="full")
-    result = result[len(result) // 2:]
+    result = result[len(x) - 1:]
     if result[0] != 0:
-        result = result / result[0]
-    return result[:max_lag]
+        result /= result[0]
+    return result
 
 
-def plot_clip(emb, temb, ts, name):
+def plot_diagnostics(emb, temb, ts, name):
     has_temb = temb is not None
-    S = sim_matrix(temb) if has_temb else sim_matrix_mean(emb)
-    source = "temporal-token" if has_temb else "mean-pooled"
+    n_plots = 4 if has_temb else 3
+    fig, axes = plt.subplots(n_plots, 1, figsize=(14, 5 * n_plots))
+    stride_sec = config.VJEPA_STRIDE_SEC
 
+    # 1. Consecutive cosine distance (mean-pooled)
     dist = cosine_dist(emb)
-    score = row_mean_score(S)
-    ac = autocorr(score, max_lag=min(300, len(score) // 2))
+    axes[0].plot(ts[1:], dist, linewidth=0.6, color="#2b6cb0")
+    axes[0].set_xlabel("time (s)")
+    axes[0].set_ylabel("cosine distance")
+    axes[0].set_title(f"{name} — consecutive cosine distance (high = change)")
 
-    fig, axes = plt.subplots(4, 1, figsize=(16, 16),
-                             gridspec_kw={"height_ratios": [1, 1, 1.5, 1]})
+    # 2. Self-similarity matrix (mean-pooled — anomaly detection)
+    sim = sim_matrix_mean(emb)
+    im = axes[1].imshow(
+        sim, aspect="auto", cmap="viridis",
+        extent=[ts[0], ts[-1], ts[-1], ts[0]],
+    )
+    axes[1].set_xlabel("time (s)")
+    axes[1].set_ylabel("time (s)")
+    axes[1].set_title(f"{name} — mean-pooled similarity (anomaly detection)")
+    plt.colorbar(im, ax=axes[1])
 
-    # --- Panel 1: Consecutive cosine distance ---
-    ax = axes[0]
-    ax.plot(ts[1:], dist, linewidth=0.5, color="#2b6cb0")
-    ax.set_ylabel("cosine distance")
-    ax.set_title(f"{name} — consecutive distance (spikes = scene change)")
-    ax.set_xlim(ts[0], ts[-1])
+    # 3. Autocorrelation of distance signal
+    ac = autocorr(dist)
+    lags = np.arange(len(ac)) * stride_sec
+    half = len(ac) // 2
+    axes[2].plot(lags[:half], ac[:half], linewidth=0.6, color="#9b2c2c")
+    axes[2].set_xlabel("lag (s)")
+    axes[2].set_ylabel("autocorrelation")
+    axes[2].set_title(f"{name} — autocorrelation (peaks = repeating period)")
+    axes[2].axhline(y=0, color="gray", linewidth=0.5)
 
-    # --- Panel 2: Row-mean typicality score ---
-    ax = axes[1]
-    ax.plot(ts, score, linewidth=0.6, color="#2d3748")
-    ax.fill_between(ts, score, alpha=0.1, color="#4a5568")
-    ax.set_ylabel("row-mean similarity")
-    ax.set_title(f"{name} — typicality (low = unlike the rest of the clip)")
-    ax.set_xlim(ts[0], ts[-1])
-
-    # --- Panel 3: Similarity matrix ---
-    ax = axes[2]
-    im = ax.imshow(S, aspect="auto", cmap=CMAP,
-                   extent=[ts[0], ts[-1], ts[-1], ts[0]])
-    ax.set_xlabel("time (s)")
-    ax.set_ylabel("time (s)")
-    ax.set_title(f"{name} — {source} similarity matrix")
-    plt.colorbar(im, ax=ax, fraction=0.02, pad=0.02)
-
-    # --- Panel 4: Autocorrelation of typicality score ---
-    ax = axes[3]
-    lags = np.arange(len(ac))
-    ax.plot(lags, ac, linewidth=0.6, color="#38a169")
-    ax.set_xlabel("lag (windows)")
-    ax.set_ylabel("autocorrelation")
-    ax.set_title(f"{name} — autocorrelation of typicality score")
-    ax.axhline(y=0, color="gray", linewidth=0.5, linestyle=":")
-    ax.set_xlim(0, len(ac))
+    # 4. Self-similarity matrix (temporal tokens — cycle structure)
+    if has_temb:
+        tsim = sim_matrix(temb)
+        im2 = axes[3].imshow(
+            tsim, aspect="auto", cmap="viridis",
+            extent=[ts[0], ts[-1], ts[-1], ts[0]],
+        )
+        axes[3].set_xlabel("time (s)")
+        axes[3].set_ylabel("time (s)")
+        axes[3].set_title(f"{name} — temporal-token similarity (cycle structure)")
+        plt.colorbar(im2, ax=axes[3])
 
     plt.tight_layout()
-    out = config.OUT / f"{name}_diagnostics.png"
-    plt.savefig(out, dpi=150)
+    out_path = config.OUT / f"{name}_diagnostics.png"
+    plt.savefig(out_path, dpi=150)
     plt.close()
-    print(f"  saved {out}")
+    print(f"  saved {out_path}")
 
 
 found = False
@@ -97,9 +90,11 @@ for i in tqdm(range(1, config.EXPECTED_CLIPS + 1), desc="analyze"):
     found = True
     emb, temb, ts = load_clip(i)
     name = f"rectified_clip_{i}"
-    print(f"{name}: {emb.shape[0]} windows")
-    plot_clip(emb, temb, ts, name)
+    print(f"{name}: {emb.shape[0]} emb" + (f" + {temb.shape} temporal" if temb is not None else ""))
+    plot_diagnostics(emb, temb, ts, name)
 
 if not found:
-    print(f"no embeddings in {config.OUT}")
+    print(f"no embeddings found in {config.OUT}")
     sys.exit(1)
+
+print("done")
