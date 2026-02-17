@@ -29,3 +29,11 @@ VJEPA_RESIZE = 256
 # 256 spatial: (256/16)² = 16×16 = 256 patches per frame.
 VJEPA_T_PATCHES = 32
 VJEPA_S_PATCHES = 256
+
+# Anomaly detection
+# Choice: mean - 2*std. Adaptive across clips. Alternative: fixed threshold (0.85).
+ANOMALY_N_STD = 2.0
+# Merge anomalies within 5s. Alternative: 2s (tighter) or 10s (merge separate events).
+ANOMALY_MIN_GAP = 5.0
+# Discard anomalies shorter than 3s. Alternative: 1s (more FP) or 5s (miss brief events).
+ANOMALY_MIN_DUR = 3.0

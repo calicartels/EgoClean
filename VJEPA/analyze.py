@@ -1,10 +1,10 @@
 import sys
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
-from tqdm import tqdm
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -21,25 +21,7 @@ def load_clip(clip_idx):
     return emb, temb, ts
 
 
-def cosine_dist(emb):
-    a, b = emb[:-1], emb[1:]
-    dots = np.sum(a * b, axis=1)
-    norms = np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1)
-    return 1.0 - dots / norms
-
-
-def sim_matrix(emb):
-    norms = np.linalg.norm(emb, axis=1, keepdims=True)
-    normed = emb / norms
-    return normed @ normed.T
-
-
 def sim_matrix_temporal(temb):
-    # Choice: flatten (N, 32, 1024) → (N, 32768), then cosine similarity.
-    # Preserves temporal ordering: position 0 of window A compared to
-    # position 0 of window B, not mixed across positions.
-    # Alternative: DTW or soft-DTW for order-invariant comparison.
-    # Unnecessary here — windows are time-aligned by design.
     n = temb.shape[0]
     flat = temb.reshape(n, -1)
     norms = np.linalg.norm(flat, axis=1, keepdims=True)
@@ -47,60 +29,84 @@ def sim_matrix_temporal(temb):
     return normed @ normed.T
 
 
-def autocorr(signal):
-    x = signal - signal.mean()
-    result = np.correlate(x, x, mode="full")
-    result = result[len(x) - 1:]
-    if result[0] != 0:
-        result /= result[0]
-    return result
+def diag_sim(temb):
+    n = temb.shape[0]
+    flat = temb.reshape(n, -1)
+    norms = np.linalg.norm(flat, axis=1, keepdims=True)
+    normed = flat / norms
+    return np.sum(normed[:-1] * normed[1:], axis=1)
 
 
-def plot_diagnostics(emb, temb, ts, name):
+def shade_anomalies(ax, anomalies):
+    for a in anomalies:
+        ax.axvspan(a["start_sec"], a["end_sec"], alpha=0.25, color="#e53e3e", zorder=0)
+
+
+def fmt_time(sec):
+    m, s = divmod(int(sec), 60)
+    return f"{m:02d}:{s:02d}"
+
+
+def plot_diagnostics(emb, temb, ts, name, anomalies):
     has_temb = temb is not None
-    n_plots = 4 if has_temb else 3
-    fig, axes = plt.subplots(n_plots, 1, figsize=(14, 5 * n_plots))
-    stride_sec = config.VJEPA_STRIDE_SEC
+    n_axes = 3 if has_temb else 2
+    fig, axes = plt.subplots(n_axes, 1, figsize=(16, 5 * n_axes))
 
-    # 1. Consecutive cosine distance (mean-pooled)
-    dist = cosine_dist(emb)
-    axes[0].plot(ts[1:], dist, linewidth=0.6, color="#2b6cb0")
-    axes[0].set_xlabel("time (s)")
-    axes[0].set_ylabel("cosine distance")
-    axes[0].set_title(f"{name} — consecutive cosine distance (high = change)")
+    if has_temb:
+        sim = diag_sim(temb)
+        threshold = float(sim.mean() - config.ANOMALY_N_STD * sim.std())
+        axes[0].plot(ts[1:], sim, linewidth=0.5, color="#2b6cb0")
+        axes[0].axhline(y=threshold, color="#e53e3e", linewidth=1, linestyle="--",
+                       label=f"threshold={threshold:.3f}")
+        shade_anomalies(axes[0], anomalies)
+        axes[0].set_xlabel("time (s)")
+        axes[0].set_ylabel("cosine similarity")
+        axes[0].set_title(f"{name} — consecutive similarity (temporal tokens)")
+        axes[0].legend(loc="lower left")
+        for a in anomalies:
+            mid = (a["start_sec"] + a["end_sec"]) / 2
+            axes[0].annotate(
+                f'{fmt_time(a["start_sec"])}–{fmt_time(a["end_sec"])}',
+                xy=(mid, threshold), fontsize=8, ha="center", va="bottom",
+                color="#e53e3e", weight="bold",
+            )
 
-    # 2. Self-similarity matrix (mean-pooled — anomaly detection)
-    sim = sim_matrix(emb)
-    im = axes[1].imshow(
-        sim, aspect="auto", cmap="viridis",
-        extent=[ts[0], ts[-1], ts[-1], ts[0]],
-    )
-    axes[1].set_xlabel("time (s)")
-    axes[1].set_ylabel("time (s)")
-    axes[1].set_title(f"{name} — mean-pooled similarity (anomaly detection)")
-    plt.colorbar(im, ax=axes[1])
-
-    # 3. Autocorrelation of distance signal
-    ac = autocorr(dist)
-    lags = np.arange(len(ac)) * stride_sec
-    half = len(ac) // 2
-    axes[2].plot(lags[:half], ac[:half], linewidth=0.6, color="#9b2c2c")
-    axes[2].set_xlabel("lag (s)")
-    axes[2].set_ylabel("autocorrelation")
-    axes[2].set_title(f"{name} — autocorrelation (peaks = repeating period)")
-    axes[2].axhline(y=0, color="gray", linewidth=0.5)
-
-    # 4. Self-similarity matrix (temporal tokens — cycle structure)
+    panel = 1 if has_temb else 0
     if has_temb:
         tsim = sim_matrix_temporal(temb)
-        im2 = axes[3].imshow(
-            tsim, aspect="auto", cmap="viridis",
-            extent=[ts[0], ts[-1], ts[-1], ts[0]],
-        )
-        axes[3].set_xlabel("time (s)")
-        axes[3].set_ylabel("time (s)")
-        axes[3].set_title(f"{name} — temporal-token similarity (cycle structure)")
-        plt.colorbar(im2, ax=axes[3])
+        im = axes[panel].imshow(tsim, aspect="auto", cmap="viridis",
+                                extent=[ts[0], ts[-1], ts[-1], ts[0]])
+        axes[panel].set_title(f"{name} — temporal-token similarity matrix")
+    else:
+        norms = np.linalg.norm(emb, axis=1, keepdims=True)
+        sim_m = (emb / norms) @ (emb / norms).T
+        im = axes[panel].imshow(sim_m, aspect="auto", cmap="viridis",
+                               extent=[ts[0], ts[-1], ts[-1], ts[0]])
+        axes[panel].set_title(f"{name} — mean-pooled similarity matrix")
+    axes[panel].set_xlabel("time (s)")
+    axes[panel].set_ylabel("time (s)")
+    plt.colorbar(im, ax=axes[panel])
+    for a in anomalies:
+        for edge in [a["start_sec"], a["end_sec"]]:
+            axes[panel].axhline(y=edge, color="#e53e3e", linewidth=0.8, alpha=0.7)
+            axes[panel].axvline(x=edge, color="#e53e3e", linewidth=0.8, alpha=0.7)
+
+    ax_strip = axes[2] if has_temb else axes[1]
+    total = ts[-1]
+    ax_strip.barh(0, total, height=0.6, color="#48bb78", label="work")
+    for a in anomalies:
+        dur = a["end_sec"] - a["start_sec"]
+        ax_strip.barh(0, dur, left=a["start_sec"], height=0.6, color="#e53e3e", label="anomaly")
+        ax_strip.text(a["start_sec"] + dur / 2, 0,
+                      f'{fmt_time(a["start_sec"])}–{fmt_time(a["end_sec"])}',
+                      ha="center", va="center", fontsize=9, color="white", weight="bold")
+    ax_strip.set_xlim(0, total)
+    ax_strip.set_yticks([])
+    ax_strip.set_xlabel("time (s)")
+    ax_strip.set_title(f"{name} — work (green) vs anomaly (red)")
+    handles, labels = ax_strip.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    ax_strip.legend(by_label.values(), by_label.keys(), loc="upper right")
 
     plt.tight_layout()
     out_path = config.OUT / f"{name}_diagnostics.png"
@@ -109,16 +115,26 @@ def plot_diagnostics(emb, temb, ts, name):
     print(f"  saved {out_path}")
 
 
-clip_indices = [i for i in range(1, config.EXPECTED_CLIPS + 1)
-                if (config.OUT / f"rectified_clip_{i}_emb.npy").exists()]
-if not clip_indices:
-    print(f"no embeddings found in {config.OUT}")
+anomaly_path = config.OUT / "anomalies.json"
+if not anomaly_path.exists():
+    print("run detect.py first")
     sys.exit(1)
+with open(anomaly_path) as f:
+    all_anomalies = json.load(f)
 
-for i in tqdm(clip_indices, desc="analyze", unit="clip"):
+found = False
+for i in range(1, config.EXPECTED_CLIPS + 1):
+    path = config.OUT / f"rectified_clip_{i}_emb.npy"
+    if not path.exists():
+        continue
+    found = True
     emb, temb, ts = load_clip(i)
     name = f"rectified_clip_{i}"
-    print(f"  {name}: {emb.shape[0]} emb" + (f" + {temb.shape} temporal" if temb is not None else ""))
-    plot_diagnostics(emb, temb, ts, name)
+    anomalies = all_anomalies.get(name, {}).get("anomalies", [])
+    print(f"{name}: {emb.shape[0]} emb, {len(anomalies)} anomalies")
+    plot_diagnostics(emb, temb, ts, name, anomalies)
 
+if not found:
+    print(f"no embeddings found in {config.OUT}")
+    sys.exit(1)
 print("done")
