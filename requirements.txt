@@ -4,6 +4,7 @@ tqdm>=4.65
 opencv-python-headless>=4.8
 numpy>=1.24
 torch>=2.0
+torchvision>=0.15
 torchcodec
 transformers>=4.52
 matplotlib>=3.7
