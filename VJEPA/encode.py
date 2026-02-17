@@ -37,16 +37,12 @@ def encode_clip(video_path, processor, model, device):
 
     print(f"  {n_frames} frames, {fps:.1f} fps, {n_windows} windows")
     dtype = torch.float16 if device != "cpu" else torch.float32
-    embeddings = []
-    timestamps = []
+    embs, tembs, timestamps = [], [], []
 
     for i in tqdm(range(n_windows), desc="encode", unit="win"):
         start = i * stride
         indices = np.arange(start, start + config.VJEPA_WINDOW)
-
-        # Choice: decode 64 frames per call. ~20 MB per window at 1080p.
-        # Alternative: preload all frames (~33 GB). Killed the process.
-        clip = vr.get_frames_at(indices=indices).data  # (64, C, H, W) uint8
+        clip = vr.get_frames_at(indices=indices).data
 
         inputs = processor(clip, return_tensors="pt")
         for k in inputs:
@@ -58,13 +54,24 @@ def encode_clip(video_path, processor, model, device):
         with torch.no_grad():
             features = model.get_vision_features(**inputs)
 
-        # Choice: mean pool over all patch tokens → single 1024-dim vector.
-        # Alternative: keep full (8192, 1024) per window. ~6 GB per clip.
-        emb = features.mean(dim=1).cpu().float().numpy()[0]
-        embeddings.append(emb)
+        # features shape: (1, T_patches * S_patches, 1024) = (1, 8192, 1024)
+        # T_patches=32 temporal, S_patches=256 spatial for ViT-L fpc64-256
+        f = features[0].cpu().float()
+
+        # Choice: mean pool everything → 1024-dim. Works for anomaly detection.
+        emb = f.mean(dim=0).numpy()
+
+        # Choice: reshape to (32, 256, 1024), mean over 256 spatial → (32, 1024).
+        # Preserves sub-window temporal structure at ~66ms resolution.
+        # Alternative: keep full (32, 256, 1024) for spatial analysis too.
+        # That's 32×256×1024×4 bytes × 1200 windows = ~40 GB. Not worth it yet.
+        temb = f.reshape(config.VJEPA_T_PATCHES, config.VJEPA_S_PATCHES, -1).mean(dim=1).numpy()
+
+        embs.append(emb)
+        tembs.append(temb)
         timestamps.append(start / fps)
 
-    return np.array(embeddings), np.array(timestamps)
+    return np.array(embs), np.array(tembs), np.array(timestamps)
 
 
 clips = sorted(config.OUT.glob("rectified_clip_*.mp4"))
@@ -78,12 +85,12 @@ print(f"  device: {device}")
 
 for clip_path in tqdm(clips, desc="clips", unit="clip"):
     print(f"\n{clip_path.name}")
-
-    embeddings, timestamps = encode_clip(clip_path, processor, model, device)
+    embs, tembs, ts = encode_clip(clip_path, processor, model, device)
 
     stem = clip_path.stem
-    np.save(config.OUT / f"{stem}_emb.npy", embeddings)
-    np.save(config.OUT / f"{stem}_ts.npy", timestamps)
-    print(f"  saved {embeddings.shape[0]} embeddings {embeddings.shape}")
+    np.save(config.OUT / f"{stem}_emb.npy", embs)
+    np.save(config.OUT / f"{stem}_temb.npy", tembs)
+    np.save(config.OUT / f"{stem}_ts.npy", ts)
+    print(f"  saved {embs.shape} mean-pooled + {tembs.shape} temporal")
 
-print("\ndone")
+print("done")

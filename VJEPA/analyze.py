@@ -16,12 +16,13 @@ def load_clip(clip_idx):
     stem = f"rectified_clip_{clip_idx}"
     emb = np.load(config.OUT / f"{stem}_emb.npy")
     ts = np.load(config.OUT / f"{stem}_ts.npy")
-    return emb, ts
+    temb_path = config.OUT / f"{stem}_temb.npy"
+    temb = np.load(temb_path) if temb_path.exists() else None
+    return emb, temb, ts
 
 
 def cosine_dist(emb):
-    a = emb[:-1]
-    b = emb[1:]
+    a, b = emb[:-1], emb[1:]
     dots = np.sum(a * b, axis=1)
     norms = np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1)
     return 1.0 - dots / norms
@@ -33,25 +34,42 @@ def sim_matrix(emb):
     return normed @ normed.T
 
 
+def sim_matrix_temporal(temb):
+    # Choice: flatten (N, 32, 1024) → (N, 32768), then cosine similarity.
+    # Preserves temporal ordering: position 0 of window A compared to
+    # position 0 of window B, not mixed across positions.
+    # Alternative: DTW or soft-DTW for order-invariant comparison.
+    # Unnecessary here — windows are time-aligned by design.
+    n = temb.shape[0]
+    flat = temb.reshape(n, -1)
+    norms = np.linalg.norm(flat, axis=1, keepdims=True)
+    normed = flat / norms
+    return normed @ normed.T
+
+
 def autocorr(signal):
     x = signal - signal.mean()
     result = np.correlate(x, x, mode="full")
-    result = result[len(x) - 1 :]
+    result = result[len(x) - 1:]
     if result[0] != 0:
         result /= result[0]
     return result
 
 
-def plot_diagnostics(emb, ts, name):
-    fig, axes = plt.subplots(3, 1, figsize=(14, 14))
+def plot_diagnostics(emb, temb, ts, name):
+    has_temb = temb is not None
+    n_plots = 4 if has_temb else 3
+    fig, axes = plt.subplots(n_plots, 1, figsize=(14, 5 * n_plots))
     stride_sec = config.VJEPA_STRIDE_SEC
 
+    # 1. Consecutive cosine distance (mean-pooled)
     dist = cosine_dist(emb)
     axes[0].plot(ts[1:], dist, linewidth=0.6, color="#2b6cb0")
     axes[0].set_xlabel("time (s)")
     axes[0].set_ylabel("cosine distance")
     axes[0].set_title(f"{name} — consecutive cosine distance (high = change)")
 
+    # 2. Self-similarity matrix (mean-pooled — anomaly detection)
     sim = sim_matrix(emb)
     im = axes[1].imshow(
         sim, aspect="auto", cmap="viridis",
@@ -59,9 +77,10 @@ def plot_diagnostics(emb, ts, name):
     )
     axes[1].set_xlabel("time (s)")
     axes[1].set_ylabel("time (s)")
-    axes[1].set_title(f"{name} — self-similarity (bright = similar content)")
+    axes[1].set_title(f"{name} — mean-pooled similarity (anomaly detection)")
     plt.colorbar(im, ax=axes[1])
 
+    # 3. Autocorrelation of distance signal
     ac = autocorr(dist)
     lags = np.arange(len(ac)) * stride_sec
     half = len(ac) // 2
@@ -71,6 +90,18 @@ def plot_diagnostics(emb, ts, name):
     axes[2].set_title(f"{name} — autocorrelation (peaks = repeating period)")
     axes[2].axhline(y=0, color="gray", linewidth=0.5)
 
+    # 4. Self-similarity matrix (temporal tokens — cycle structure)
+    if has_temb:
+        tsim = sim_matrix_temporal(temb)
+        im2 = axes[3].imshow(
+            tsim, aspect="auto", cmap="viridis",
+            extent=[ts[0], ts[-1], ts[-1], ts[0]],
+        )
+        axes[3].set_xlabel("time (s)")
+        axes[3].set_ylabel("time (s)")
+        axes[3].set_title(f"{name} — temporal-token similarity (cycle structure)")
+        plt.colorbar(im2, ax=axes[3])
+
     plt.tight_layout()
     out_path = config.OUT / f"{name}_diagnostics.png"
     plt.savefig(out_path, dpi=150)
@@ -78,19 +109,16 @@ def plot_diagnostics(emb, ts, name):
     print(f"  saved {out_path}")
 
 
-found = False
-for i in tqdm(range(1, config.EXPECTED_CLIPS + 1), desc="analyze", unit="clip"):
-    path = config.OUT / f"rectified_clip_{i}_emb.npy"
-    if not path.exists():
-        continue
-    found = True
-    emb, ts = load_clip(i)
-    name = f"rectified_clip_{i}"
-    print(f"{name}: {emb.shape[0]} embeddings, {ts[0]:.1f}–{ts[-1]:.1f}s")
-    plot_diagnostics(emb, ts, name)
-
-if not found:
+clip_indices = [i for i in range(1, config.EXPECTED_CLIPS + 1)
+                if (config.OUT / f"rectified_clip_{i}_emb.npy").exists()]
+if not clip_indices:
     print(f"no embeddings found in {config.OUT}")
     sys.exit(1)
+
+for i in tqdm(clip_indices, desc="analyze", unit="clip"):
+    emb, temb, ts = load_clip(i)
+    name = f"rectified_clip_{i}"
+    print(f"  {name}: {emb.shape[0]} emb" + (f" + {temb.shape} temporal" if temb is not None else ""))
+    plot_diagnostics(emb, temb, ts, name)
 
 print("done")
