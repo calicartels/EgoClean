@@ -31,7 +31,7 @@ VJEPA_S_PATCHES = 256
 # Anomaly detection — hysteresis (LAPS-style). Signal: 1 - row_mean_similarity.
 DETECT_EMA_ALPHA = 0.15
 DETECT_THETA_ON = None  # None = Otsu auto, else float override
-DETECT_HYSTERESIS_RATIO = 0.6
+DETECT_HYSTERESIS_RATIO = 0.5  # theta_off = median + ratio * (theta_on - median)
 DETECT_DEBOUNCE_ON = 3
 DETECT_DEBOUNCE_OFF = 3
 DETECT_MIN_DUR = 3.0

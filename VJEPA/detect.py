@@ -87,7 +87,7 @@ def states_to_segments(states, ts, min_dur):
     return result
 
 
-def plot_detection(ts, raw, smoothed, theta_on, theta_off, anomalies, name):
+def plot_detection(ts, raw, smoothed, theta_on, theta_off, median, anomalies, name):
     fig, ax = plt.subplots(figsize=(16, 4))
     ax.plot(ts, raw, alpha=0.25, linewidth=0.4, color="gray", label="raw")
     ax.plot(ts, smoothed, linewidth=0.8, color="#2b6cb0", label="EMA smoothed")
@@ -95,6 +95,8 @@ def plot_detection(ts, raw, smoothed, theta_on, theta_off, anomalies, name):
                label=f"θ_on={theta_on:.4f} (Otsu)")
     ax.axhline(theta_off, color="#ed8936", linewidth=0.8, linestyle=":",
                label=f"θ_off={theta_off:.4f}")
+    ax.axhline(median, color="#38a169", linewidth=0.6, linestyle="-.",
+               label=f"median={median:.4f}", alpha=0.6)
     for a in anomalies:
         ax.axvspan(a["start_sec"], a["end_sec"], alpha=0.15, color="#e53e3e")
     ax.set_xlabel("time (s)")
@@ -129,7 +131,8 @@ for i in clip_indices:
     smoothed = ema_smooth(raw_score, config.DETECT_EMA_ALPHA)
 
     theta_on = config.DETECT_THETA_ON if config.DETECT_THETA_ON is not None else otsu_1d(smoothed)
-    theta_off = theta_on * config.DETECT_HYSTERESIS_RATIO
+    median = float(np.median(smoothed))
+    theta_off = median + config.DETECT_HYSTERESIS_RATIO * (theta_on - median)
 
     states = hysteresis_detect(
         smoothed, theta_on, theta_off,
@@ -140,15 +143,16 @@ for i in clip_indices:
     results[name] = {
         "theta_on": round(float(theta_on), 4),
         "theta_off": round(float(theta_off), 4),
+        "median": round(float(median), 4),
         "method": "otsu" if config.DETECT_THETA_ON is None else "manual",
         "anomalies": anomalies,
     }
 
-    print(f"{name}: θ_on={theta_on:.4f}, θ_off={theta_off:.4f}, {len(anomalies)} anomalies")
+    print(f"{name}: median={median:.4f}, θ_on={theta_on:.4f}, θ_off={theta_off:.4f}, {len(anomalies)} anomalies")
     for a in anomalies:
         print(f"  {a['start_fmt']}-{a['end_fmt']} ({a['duration']}s)")
 
-    plot_detection(ts, raw_score, smoothed, theta_on, theta_off, anomalies, name)
+    plot_detection(ts, raw_score, smoothed, theta_on, theta_off, median, anomalies, name)
 
 out_path = config.OUT / "anomalies.json"
 with open(out_path, "w") as f:
