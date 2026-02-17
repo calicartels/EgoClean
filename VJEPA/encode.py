@@ -79,11 +79,16 @@ if not clips:
     print(f"no rectified clips in {config.OUT}")
     sys.exit(1)
 
+to_encode = [p for p in clips if not (config.OUT / f"{p.stem}_emb.npy").exists()]
+if not to_encode:
+    print("all clips already encoded")
+    sys.exit(0)
+
 print(f"loading {config.VJEPA_REPO}")
 processor, model, device = load_model()
 print(f"  device: {device}")
 
-for clip_path in tqdm(clips, desc="clips", unit="clip"):
+for clip_path in tqdm(to_encode, desc="clips", unit="clip"):
     print(f"\n{clip_path.name}")
     embs, tembs, ts = encode_clip(clip_path, processor, model, device)
 
