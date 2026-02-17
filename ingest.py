@@ -23,6 +23,7 @@ def is_done():
 def download():
     if config.TAR_PATH.exists():
         return
+    print("download")
     load_dotenv()
     token = os.getenv("HF_KEY")
     config.DATA.mkdir(parents=True, exist_ok=True)
@@ -39,6 +40,7 @@ def extract():
     mp4s = list(config.EXTRACT_DIR.glob("*.mp4"))
     if mp4s and config.INTRINSICS_PATH.exists():
         return
+    print("extract")
     if not config.TAR_PATH.exists():
         sys.exit(1)
     config.EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
@@ -63,6 +65,7 @@ def extract():
 def rectify():
     if is_done():
         return
+    print("rectify")
     if not config.INTRINSICS_PATH.exists():
         sys.exit(1)
     config.OUT.mkdir(parents=True, exist_ok=True)
@@ -106,9 +109,11 @@ elif cmd == "rectify":
 elif cmd == "all":
     if is_done():
         flatten_out()
+        print("already done")
         sys.exit(0)
     download()
     extract()
     rectify()
+    print("done")
 else:
     sys.exit(1)
