@@ -122,10 +122,10 @@ if ok:
     print(f"\nText test: {response[:100]}")
 
     # Video inference on rectified egocentric clip
-    # Choice: fps=0.5 to keep frame count low (~1 frame per 2s) for VRAM headroom.
-    # Alternative: fps=1.0 gives more temporal detail but doubles frame count.
+    # Choice: fps=0.1 to keep frame count ~120 for 20min video.
+    # fps=0.5 (600 frames) causes OOM in SigLIP vision encoder.
     VIDEO_PATH = "../data/factory_001/rectified_clip_2.mp4"
-    model.config.fps = 0.5
+    model.config.fps = 0.1
     print(f"\nRunning video inference on {VIDEO_PATH}...")
     vram_report()
     response = model.generate_content(
