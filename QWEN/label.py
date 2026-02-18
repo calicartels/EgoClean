@@ -8,6 +8,7 @@ from qwen_vl_utils import process_vision_info
 from tqdm import tqdm
 
 import config
+from parse import fmt, parse_time
 
 PROMPT = """This {dur}s clip is from a head-mounted camera on a factory worker. Each frame = 1 second.
 
@@ -35,7 +36,7 @@ If on-task the whole time, just: {start} CYCLE"""
 
 def load_model():
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        config.MODEL, torch_dtype=torch.float16, device_map="cuda",
+        config.MODEL, dtype=torch.float16, device_map="cuda",
     )
     proc = AutoProcessor.from_pretrained(config.MODEL)
     return model, proc
@@ -50,11 +51,6 @@ def extract_window(cap, start_sec, dur, video_fps):
             break
         frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
     return frames
-
-
-def fmt(sec):
-    m, s = divmod(int(sec), 60)
-    return f"{m}:{s:02d}"
 
 
 def run_window(frames, start_sec, dur, model, proc):
@@ -84,22 +80,12 @@ def run_window(frames, start_sec, dur, model, proc):
     return proc.batch_decode(out, skip_special_tokens=True)[0]
 
 
-def parse_time(s):
-    parts = s.split(":")
-    if len(parts) != 2:
-        return None
-    return int(parts[0]) * 60 + int(parts[1])
-
-
 def parse_transitions(text, start_sec, dur):
     transitions = []
     for line in text.strip().split("\n"):
         line = line.strip()
         if not line:
             continue
-        # Choice: match CYCLE/OTHER plus C/O as fallback in case model abbreviates.
-        # Alternative: strict CYCLE/OTHER only — risks missing valid but abbreviated
-        # responses.
         m = re.match(r"(\d+:\d{2})\s+(CYCLE|OTHER|C|O)\s*(.*)", line, re.IGNORECASE)
         if not m:
             continue
@@ -107,7 +93,6 @@ def parse_transitions(text, start_sec, dur):
         if sec is None:
             continue
         raw_status = m.group(2).upper()
-        # Normalize: C/CYCLE -> CYCLE, O/OTHER -> OTHER
         status = "CYCLE" if raw_status in ("C", "CYCLE") else "OTHER"
         reason = m.group(3).strip()
         transitions.append({"sec": sec, "status": status, "reason": reason})
@@ -123,6 +108,10 @@ def parse_transitions(text, start_sec, dur):
             labels.append({"sec": s, "time": fmt(s), "status": tr["status"], "reason": tr["reason"]})
     return labels
 
+
+if not config.CLIPS:
+    print(f"no rectified clips in {config.CLIP_DIR}, run ingest first")
+    exit(1)
 
 model, proc = load_model()
 config.OUT_DIR.mkdir(parents=True, exist_ok=True)
