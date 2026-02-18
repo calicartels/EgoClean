@@ -31,7 +31,17 @@ def vram_snapshot(label):
 
 
 def patched_post_config(self_model):
-    # Only convert vision_tower and mm_projector — LLM stays quantized
+    import bitsandbytes as bnb
+
+    # Convert non-quantized LLM layers (embeddings, norms, lm_head) to fp16.
+    # We skip Linear4bit modules — calling .to() on them crashes in transformers 4.x.
+    for module in self_model.llm.modules():
+        if isinstance(module, bnb.nn.Linear4bit):
+            module.compute_dtype = torch.float16
+            continue
+        for param in module.parameters(recurse=False):
+            param.data = param.data.to(torch.float16)
+
     self_model.mm_projector = self_model.mm_projector.to(torch.float16)
     self_model.vision_tower = self_model.vision_tower.to(torch.float16)
 
@@ -46,7 +56,7 @@ def patched_post_config(self_model):
         self_model.config.vision_tower_cfg = self_model.vision_tower.config
     if getattr(self_model.config, "mm_projector_cfg", None) is None:
         self_model.config.mm_projector_cfg = self_model.mm_projector.config
-    print("  Patched post_config: skipped .to(float16) on quantized LLM")
+    print("  Patched post_config: converted non-quantized LLM layers to fp16")
 
 
 def find_and_patch_vila_class():
