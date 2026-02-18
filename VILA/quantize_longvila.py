@@ -168,15 +168,23 @@ ok = verify(model)
 print_vram_report(vram_before, vram_after)
 
 if ok:
-    print("\nTesting text-only inference...")
-    vram_snapshot("Before inference")
     gen_cfg = model.default_generation_config
-    gen_cfg.max_new_tokens = 100
-    gen_cfg.max_length = 200
+    gen_cfg.max_new_tokens = 150
+    gen_cfg.max_length = 300
     gen_cfg.do_sample = False
-    response = model.generate_content(["What is 2 + 2?"], generation_config=gen_cfg)
-    vram_snapshot("After inference")
-    print(f"Response: {response[:300]}")
+
+    prompts = [
+        "What is 2 + 2?",
+        "A person is cooking in a kitchen. What might they do next? Think step by step.",
+        "Describe what a typical sunset looks like in three sentences.",
+    ]
+
+    for i, prompt in enumerate(prompts):
+        print(f"\nTest {i+1}: {prompt[:60]}...")
+        vram_snapshot("Before inference")
+        response = model.generate_content([prompt], generation_config=gen_cfg)
+        vram_snapshot("After inference")
+        print(f"Response: {response[:300]}")
 
 vram_snapshot("Final")
 
