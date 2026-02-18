@@ -160,9 +160,12 @@ ok = verify(model)
 print_vram_report(vram_before, vram_after)
 
 if ok:
+    from transformers import GenerationConfig
+    gen_cfg = GenerationConfig(max_new_tokens=100, do_sample=False)
+
     print("\nTesting text-only inference...")
     vram_snapshot("Before inference")
-    response = model.generate_content(["What is 2 + 2?"])
+    response = model.generate_content(["What is 2 + 2?"], generation_config=gen_cfg)
     vram_snapshot("After inference")
     print(f"Response: {response[:200]}")
 
