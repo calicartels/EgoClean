@@ -198,7 +198,24 @@ if ok:
         token = model.tokenizer.decode([idx])
         print(f"    {idx.item():6d} -> '{token}' (logit={val:.2f})")
 
-    # Test 2: generate_content with model's own default config + max_new_tokens cap
+    # Test 1.5: LLM.generate with input_ids (bypasses _embed entirely)
+    print("\nTest 1.5: LLM.generate with input_ids directly...")
+    gen_out = model.llm.generate(input_ids=test_ids, max_new_tokens=30, do_sample=False)
+    decoded = model.tokenizer.decode(gen_out[0], skip_special_tokens=True)
+    print(f"  Direct LLM output: {decoded[:200]}")
+
+    # Test 1.6: LLM.generate with inputs_embeds (same path as generate_content)
+    print("\nTest 1.6: LLM.generate with inputs_embeds...")
+    embed_layer = model.llm.get_input_embeddings()
+    test_embeds = embed_layer(test_ids).to(torch.float16)
+    print(f"  Embed stats: dtype={test_embeds.dtype}, "
+          f"min={test_embeds.min():.4f}, max={test_embeds.max():.4f}, "
+          f"has_nan={test_embeds.isnan().any()}")
+    gen_out2 = model.llm.generate(inputs_embeds=test_embeds, max_new_tokens=30, do_sample=False)
+    decoded2 = model.tokenizer.decode(gen_out2[0], skip_special_tokens=True)
+    print(f"  Embeds-based output: {decoded2[:200]}")
+
+    # Test 2: generate_content with model's own default config
     print("\nTest 2: generate_content with default config...")
     vram_snapshot("Before inference")
     gen_cfg = model.default_generation_config
