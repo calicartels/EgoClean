@@ -9,15 +9,13 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 MODEL_ID = "Efficient-Large-Model/LongVILA-R1-7B"
 
-# Choice: INT8 over NF4 (INT4).
-# Qwen2 backbone has known KV cache corruption with bnb 4-bit
-# that produces garbage during autoregressive generation.
-# INT8 uses ~9.6GB vs ~5GB, but generation works correctly.
 QUANT_CONFIG = BitsAndBytesConfig(
     load_in_8bit=True,
     llm_int8_threshold=6.0,
 )
 
+# Choice: fps=4.0 on 20min = 4800 frames. Already proven to fit in 24GB INT8.
+# Previous run: 321s, 9.6GB VRAM. Plenty of headroom.
 FPS = 4.0
 
 VIDEO_PATH = "../data/factory_001/rectified_clip_2.mp4"
@@ -34,25 +32,32 @@ SYSTEM_PROMPT = (
     "Question: {question}"
 )
 
+# Choice: dense timeline extraction over anomaly detection prompt.
+# Previous prompt asked model to judge normal vs abnormal — it compressed
+# 20 minutes into one observation. LongVILA demos (football, poker, starcraft)
+# show it excels at dense play-by-play temporal description.
+# We extract the raw timeline, then filter for anomalies ourselves in Python.
 QUESTION = (
-    "This is a 7-minute egocentric video from a factory floor at 4 frames per second. "
-    "The worker's normal routine is a repetitive press-machine cycle: "
-    "pick up material, load it into the press, activate the press, wait, "
-    "remove the finished piece, set it aside. This cycle repeats many times. "
+    "This is a 20-minute egocentric video from a factory floor at 4 frames per second. "
+    "The camera is mounted on the worker's head. "
     "\n\n"
-    "Your task: Watch the ENTIRE video and identify every moment where the "
-    "worker BREAKS from this repetitive cycle. Anomalies include: "
-    "adjusting or fixing the machine, inspecting a part closely, pausing or hesitating, "
-    "walking away, talking to someone, handling a different tool or object, "
-    "or any action that is NOT part of the normal pick-load-press-remove cycle. "
+    "Describe EVERYTHING the worker does, minute by minute. "
+    "For each minute of video (0:00-1:00, 1:00-2:00, 2:00-3:00, etc up to 20:00), "
+    "list every distinct action the worker performs with approximate timestamps. "
     "\n\n"
-    "For each anomaly, report:\n"
-    "- The approximate time in the video (MM:SS)\n"
-    "- What the worker is doing differently\n"
-    "- Why it appears to be a break from routine\n"
+    "Be extremely specific about:\n"
+    "- What the hands are doing (picking up, pressing, turning, holding)\n"
+    "- What objects are being touched or manipulated\n"
+    "- Any pauses, hesitations, or changes in pace\n"
+    "- Any interactions with other people\n"
+    "- Any time the worker walks away from the main workstation\n"
+    "- Body position changes (bending, reaching, stepping back)\n"
     "\n"
-    "If the entire video shows only the normal cycle with no breaks, say "
-    "'No anomalies detected - all frames show standard press cycle.'"
+    "Do NOT summarize or skip repetitive actions. "
+    "Describe each cycle individually even if they look similar. "
+    "If the worker repeats the same action 5 times in one minute, describe all 5. "
+    "\n\n"
+    "Output as a structured timeline with timestamps."
 )
 
 
@@ -179,16 +184,21 @@ if not ok:
     sys.exit(1)
 
 model.config.fps = FPS
-print(f"\nfps={FPS} -> ~{int(7 * 60 * FPS)} frames for 7min video")
+print(f"\nfps={FPS} -> ~{int(20 * 60 * FPS)} frames for 20min video")
 
 gen_cfg = model.default_generation_config
-gen_cfg.max_new_tokens = 4096
-gen_cfg.max_length = 8192
+# Choice: max_new_tokens=8192 for dense 20-minute play-by-play.
+# Previous 4096 limit produced 3 sentences. A minute-by-minute timeline
+# of 20 minutes with per-cycle descriptions needs much more room.
+# Alternative: 16384 would be safer but generation would take very long.
+gen_cfg.max_new_tokens = 8192
+gen_cfg.max_length = 16384
 gen_cfg.do_sample = False
 
 prompt = SYSTEM_PROMPT.format(question=QUESTION)
 
 print(f"Running inference on {VIDEO_PATH}...")
+print(f"Expecting ~5-15 min for vision encoding + generation")
 torch.cuda.empty_cache()
 vram_report()
 
@@ -199,11 +209,16 @@ response = model.generate_content(
 )
 elapsed = time.time() - t0
 
-print(f"\nInference took {elapsed:.1f}s")
+print(f"\nInference took {elapsed:.1f}s ({elapsed/60:.1f} min)")
 vram_report()
 
-# Full output, no truncation
 print("\n" + "=" * 60)
 print("FULL RESPONSE:")
 print("=" * 60)
 print(response)
+
+# Save to file for later analysis
+out_path = "../data/factory_001/longvila_timeline_clip2.txt"
+with open(out_path, "w") as f:
+    f.write(response)
+print(f"\nSaved to {out_path}")
