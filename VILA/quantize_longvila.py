@@ -22,7 +22,7 @@ def vram_snapshot(label):
     alloc = torch.cuda.memory_allocated() / 1e9
     res = torch.cuda.memory_reserved() / 1e9
     peak = torch.cuda.max_memory_allocated() / 1e9
-    total = torch.cuda.get_device_properties(0).total_mem / 1e9
+    total = torch.cuda.get_device_properties(0).total_memory / 1e9
     free = total - alloc
     print(f"[{label}] VRAM: {alloc:.2f}/{total:.1f}GB allocated, "
           f"{res:.2f}GB reserved, {peak:.2f}GB peak, {free:.1f}GB free")
