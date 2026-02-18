@@ -173,9 +173,9 @@ if ok:
     
     response = model.generate_content(
         [
-            "Watch this egocentric video carefully. "
-            "List the timestamps where the person performs a non-repetitive action. "
-            "For each timestamp, describe what the action is.",
+            f"Watch this egocentric video carefully. The video is sampled at {model.config.fps} frames per second. "
+            "List the timestamps and frame numbers where the person performs a non-repetitive action. "
+            "Format: [Frame X - Time MM:SS] Description.",
             {"path": VIDEO_PATH},
         ],
         generation_config=gen_cfg,
