@@ -5,7 +5,6 @@ import torch
 import transformers
 from transformers import AutoModel, AutoConfig, BitsAndBytesConfig
 
-# Help with memory fragmentation
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 MODEL_ID = "Efficient-Large-Model/LongVILA-R1-7B"
@@ -19,12 +18,47 @@ QUANT_CONFIG = BitsAndBytesConfig(
     llm_int8_threshold=6.0,
 )
 
+FPS = 4.0
+
+VIDEO_PATH = "../data/factory_001/rectified_clip_2.mp4"
+
+SYSTEM_PROMPT = (
+    "You are a helpful assistant. The user asks a question, "
+    "and then you solves it.\n\n"
+    "Please first think deeply about the question based on the "
+    "given video, and then provide the final answer. The reasoning "
+    "process and answer are enclosed within <think> </think> and "
+    "<answer> </answer> tags, respectively, i.e., "
+    "<think> reasoning process here </think> "
+    "<answer> answer here </answer>.\n\n"
+    "Question: {question}"
+)
+
+QUESTION = (
+    "This is a 7-minute egocentric video from a factory floor at 4 frames per second. "
+    "The worker's normal routine is a repetitive press-machine cycle: "
+    "pick up material, load it into the press, activate the press, wait, "
+    "remove the finished piece, set it aside. This cycle repeats many times. "
+    "\n\n"
+    "Your task: Watch the ENTIRE video and identify every moment where the "
+    "worker BREAKS from this repetitive cycle. Anomalies include: "
+    "adjusting or fixing the machine, inspecting a part closely, pausing or hesitating, "
+    "walking away, talking to someone, handling a different tool or object, "
+    "or any action that is NOT part of the normal pick-load-press-remove cycle. "
+    "\n\n"
+    "For each anomaly, report:\n"
+    "- The approximate time in the video (MM:SS)\n"
+    "- What the worker is doing differently\n"
+    "- Why it appears to be a break from routine\n"
+    "\n"
+    "If the entire video shows only the normal cycle with no breaks, say "
+    "'No anomalies detected - all frames show standard press cycle.'"
+)
+
 
 def patched_post_config(self_model):
     import bitsandbytes as bnb
 
-    # Convert non-quantized LLM layers (embeddings, norms, lm_head) to fp16.
-    # Skip Int8 linear modules — .to() on them crashes in transformers 4.x.
     for module in self_model.llm.modules():
         if isinstance(module, bnb.nn.Linear8bitLt):
             continue
@@ -48,54 +82,40 @@ def patched_post_config(self_model):
 
 
 def patched_encode_images(self_model, images):
-    # Vision Encoder Chunking Patch
-    # SigLIP OOMs if we process 600 frames at once.
-    # We chunk the input tensor (Batch, C, H, W) and process in small batches.
     import torch
-    
-    # If not a tensor or small enough, use original logic
+
     if not isinstance(images, torch.Tensor) or images.shape[0] <= 8:
         return self_model.mm_projector(self_model.get_vision_tower()(images))
 
-    # Chunking logic
     features_list = []
     chunk_size = 8
     for i in range(0, images.shape[0], chunk_size):
         chunk = images[i : i + chunk_size]
-        # Vision tower + projector for each chunk
         feat = self_model.get_vision_tower()(chunk)
         feat = self_model.mm_projector(feat)
         features_list.append(feat)
-    
+
     return torch.cat(features_list, dim=0)
 
 
 def find_and_patch_vila_class():
     for mod_name, mod in sys.modules.items():
         if "modeling_vila" in mod_name and hasattr(mod, "VILAPretrainedModel"):
-            # Patch post_config
             original_post = mod.VILAPretrainedModel.post_config
             mod.VILAPretrainedModel.post_config = patched_post_config
-            
-            # Patch encode_images for chunking
-            # (Backup original if needed, but we just replace it)
+
             if hasattr(mod.VILAPretrainedModel, "encode_images"):
-                original_encode = mod.VILAPretrainedModel.encode_images
                 mod.VILAPretrainedModel.encode_images = patched_encode_images
-                print("  Patched VILAPretrainedModel.encode_images (vision chunking)")
-            
+                print("  Patched encode_images (vision chunking)")
+
             return mod, original_post
     return None, None
 
 
 def load_quantized():
-    # Phase 1: load config to trigger remote code download
     config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
-
-    # Phase 2: patch post_config on the now-imported VILAPretrainedModel
     vila_mod, original_post_config = find_and_patch_vila_class()
 
-    # Phase 3: patch AutoModelForCausalLM.from_pretrained to inject quantization
     original_from_pretrained = transformers.AutoModelForCausalLM.from_pretrained
 
     def patched_from_pretrained(*args, **kwargs):
@@ -119,8 +139,6 @@ def load_quantized():
 
     print(f"Model loaded in {elapsed:.1f}s")
 
-    # Instance-level patch to ensure chunking is used
-    # Class-level patching can be tricky with inheritance/shadowing
     import types
     if hasattr(model, "encode_images"):
         model.encode_images = types.MethodType(patched_encode_images, model)
@@ -156,29 +174,36 @@ model = load_quantized()
 ok = verify(model)
 vram_report()
 
-if ok:
-    gen_cfg = model.default_generation_config
-    gen_cfg.max_new_tokens = 2048
-    gen_cfg.max_length = 4096
-    gen_cfg.do_sample = False
-    # Video inference on rectified egocentric clip
-    # Choice: fps=0.5 (~600 frames) works now thanks to vision chunking patch!
-    # Without chunking, even 30 frames (fps=0.025) caused OOM.
-    VIDEO_PATH = "../data/factory_001/rectified_clip_2.mp4"
-    model.config.fps = 0.5
-    
-    print(f"\nRunning video inference on {VIDEO_PATH}...")
-    torch.cuda.empty_cache()
-    vram_report()
-    
-    response = model.generate_content(
-        [
-            f"Watch this egocentric video carefully. The video is sampled at {model.config.fps} frames per second. "
-            "List the timestamps and frame numbers where the person performs a non-repetitive action. "
-            "Format: [Frame X - Time MM:SS] Description.",
-            {"path": VIDEO_PATH},
-        ],
-        generation_config=gen_cfg,
-    )
-    print(f"\n> Non-repetitive actions:\n{response[:1000]}")
-    vram_report()
+if not ok:
+    print("Quantization verification failed.")
+    sys.exit(1)
+
+model.config.fps = FPS
+print(f"\nfps={FPS} -> ~{int(7 * 60 * FPS)} frames for 7min video")
+
+gen_cfg = model.default_generation_config
+gen_cfg.max_new_tokens = 4096
+gen_cfg.max_length = 8192
+gen_cfg.do_sample = False
+
+prompt = SYSTEM_PROMPT.format(question=QUESTION)
+
+print(f"Running inference on {VIDEO_PATH}...")
+torch.cuda.empty_cache()
+vram_report()
+
+t0 = time.time()
+response = model.generate_content(
+    [prompt, {"path": VIDEO_PATH}],
+    generation_config=gen_cfg,
+)
+elapsed = time.time() - t0
+
+print(f"\nInference took {elapsed:.1f}s")
+vram_report()
+
+# Full output, no truncation
+print("\n" + "=" * 60)
+print("FULL RESPONSE:")
+print("=" * 60)
+print(response)
