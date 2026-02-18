@@ -114,23 +114,28 @@ vram_report()
 
 if ok:
     gen_cfg = model.default_generation_config
-    gen_cfg.max_new_tokens = 150
-    gen_cfg.max_length = 300
+    gen_cfg.max_new_tokens = 2048
+    gen_cfg.max_length = 4096
     gen_cfg.do_sample = False
+    # Text-only sanity check
+    response = model.generate_content(["What is 2 + 2?"], generation_config=gen_cfg)
+    print(f"\nText test: {response[:100]}")
 
-    prompts = [
-        "What is 2 + 2?",
-        "A person is cooking in a kitchen. What might they do next? Think step by step.",
-        "Describe what a typical sunset looks like in three sentences.",
-    ]
-
-    for prompt in prompts:
-        response = model.generate_content([prompt], generation_config=gen_cfg)
-        print(f"\n> {prompt}\n{response[:300]}")
-
+    # Video inference on rectified egocentric clip
+    # Choice: fps=0.5 to keep frame count low (~1 frame per 2s) for VRAM headroom.
+    # Alternative: fps=1.0 gives more temporal detail but doubles frame count.
+    VIDEO_PATH = "../data/factory_001/rectified_clip_2.mp4"
+    model.config.fps = 0.5
+    print(f"\nRunning video inference on {VIDEO_PATH}...")
     vram_report()
-
-# To test with video:
-# model.config.fps = 0.5
-# response = model.generate_content(["Describe this video.", {"path": "video.mp4"}])
-# print(response)
+    response = model.generate_content(
+        [
+            "Watch this egocentric video carefully. "
+            "List the timestamps where the person performs a non-repetitive action. "
+            "For each timestamp, describe what the action is.",
+            {"path": VIDEO_PATH},
+        ],
+        generation_config=gen_cfg,
+    )
+    print(f"\n> Non-repetitive actions:\n{response[:1000]}")
+    vram_report()
