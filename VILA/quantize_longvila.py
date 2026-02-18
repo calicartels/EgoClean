@@ -6,12 +6,14 @@ from tqdm import tqdm
 from transformers import AutoModel, AutoConfig, BitsAndBytesConfig
 
 MODEL_ID = "Efficient-Large-Model/LongVILA-R1-7B"
-QUANT_TYPE = "nf4"
+
+# Choice: INT8 instead of NF4 (INT4).
+# Qwen2 has known activation quantization errors with bnb 4-bit that produce
+# garbage during autoregressive generation (KV cache corruption).
+# INT8 avoids this — ~8GB vs ~5GB, but generation works correctly.
 QUANT_CONFIG = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_compute_dtype=torch.float16,
-    bnb_4bit_quant_type=QUANT_TYPE,
-    bnb_4bit_use_double_quant=False,
+    load_in_8bit=True,
+    llm_int8_threshold=6.0,
 )
 
 
@@ -34,10 +36,9 @@ def patched_post_config(self_model):
     import bitsandbytes as bnb
 
     # Convert non-quantized LLM layers (embeddings, norms, lm_head) to fp16.
-    # We skip Linear4bit modules — calling .to() on them crashes in transformers 4.x.
+    # Skip Int8 linear modules — calling .to() on them crashes in transformers 4.x.
     for module in self_model.llm.modules():
-        if isinstance(module, bnb.nn.Linear4bit):
-            module.compute_dtype = torch.float16
+        if isinstance(module, bnb.nn.Linear8bitLt):
             continue
         for param in module.parameters(recurse=False):
             param.data = param.data.to(torch.float16)
@@ -71,24 +72,21 @@ def find_and_patch_vila_class():
 def load_quantized():
     vram_snapshot("Before loading")
 
-    # Phase 1: Load config to trigger remote code download
     print("Downloading remote code...")
     config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
 
-    # Phase 2: Patch post_config on the now-imported VILAPretrainedModel
     vila_mod, original_post_config = find_and_patch_vila_class()
     if vila_mod:
         print("  Patched VILAPretrainedModel.post_config")
     else:
         print("  WARNING: could not find VILAPretrainedModel to patch")
 
-    # Phase 3: Patch AutoModelForCausalLM.from_pretrained to inject quantization
     original_from_pretrained = transformers.AutoModelForCausalLM.from_pretrained
 
     def patched_from_pretrained(*args, **kwargs):
         if "quantization_config" not in kwargs:
             kwargs["quantization_config"] = QUANT_CONFIG
-            print("  Injected INT4 quantization into LLM loading")
+            print("  Injected INT8 quantization into LLM loading")
         return original_from_pretrained(*args, **kwargs)
 
     pbar = tqdm(total=1, desc="Loading LongVILA-R1-7B", unit="model")
@@ -129,12 +127,12 @@ def verify(model):
     modules = list(model.llm.named_modules())
     n_quant, n_regular = 0, 0
     for _, m in tqdm(modules, desc="Checking layer types", unit="module"):
-        if isinstance(m, bnb.nn.Linear4bit):
+        if isinstance(m, bnb.nn.Linear8bitLt):
             n_quant += 1
         elif isinstance(m, torch.nn.Linear):
             n_regular += 1
 
-    print(f"LLM layers: {n_quant} quantized (Linear4bit), {n_regular} regular (Linear)")
+    print(f"LLM layers: {n_quant} quantized (Linear8bit), {n_regular} regular (Linear)")
 
     if n_quant == 0:
         print("WARNING: no quantized layers found, quantization may have failed")
@@ -152,11 +150,11 @@ def print_vram_report(before, after):
     print(f"  Before load: {alloc_before:.2f}GB")
     print(f"  After load:  {alloc_after:.2f}GB")
     print(f"  Delta:       {delta:.2f}GB (model footprint)")
-    print(f"  Expected ~4-5GB for INT4, ~14GB for fp16")
+    print(f"  Expected ~8-9GB for INT8, ~14GB for fp16")
 
 
 print("=" * 50)
-print("LongVILA-R1-7B INT4 Quantization")
+print("LongVILA-R1-7B INT8 Quantization")
 print("=" * 50)
 
 vram_before = vram_snapshot("Baseline")
@@ -170,67 +168,15 @@ ok = verify(model)
 print_vram_report(vram_before, vram_after)
 
 if ok:
-    # Diagnostics: print dtypes of key layers
-    print("\nDtype diagnostics:")
-    emb = model.llm.get_input_embeddings()
-    print(f"  Embedding weight dtype: {emb.weight.dtype}")
-    lm_head = model.llm.get_output_embeddings()
-    if lm_head is not None:
-        print(f"  LM head weight dtype: {lm_head.weight.dtype}")
-
-    # Check first layer norm dtype
-    for name, param in model.llm.named_parameters():
-        if "norm" in name.lower() or "layernorm" in name.lower():
-            print(f"  {name}: {param.dtype}")
-            break
-
-    # Test 1: raw LLM forward pass to check logits sanity
-    print("\nTest 1: Raw LLM forward pass...")
-    test_ids = model.tokenizer("What is 2 + 2? The answer is", return_tensors="pt").input_ids.cuda()
-    with torch.no_grad():
-        out = model.llm(input_ids=test_ids)
-    logits = out.logits[0, -1]
-    top5 = torch.topk(logits, 5)
-    print(f"  Logits stats: min={logits.min():.2f}, max={logits.max():.2f}, "
-          f"has_nan={logits.isnan().any()}, has_inf={logits.isinf().any()}")
-    print(f"  Top-5 next tokens:")
-    for val, idx in zip(top5.values, top5.indices):
-        token = model.tokenizer.decode([idx])
-        print(f"    {idx.item():6d} -> '{token}' (logit={val:.2f})")
-
-    # Test 2: Manual autoregressive loop (no generate(), no KV cache)
-    print("\nTest 2: Manual autoregressive (5 steps, no KV cache)...")
-    ids = test_ids.clone()
-    for step in range(5):
-        with torch.no_grad():
-            out = model.llm(input_ids=ids)
-        next_token = out.logits[0, -1].argmax().unsqueeze(0).unsqueeze(0)
-        ids = torch.cat([ids, next_token], dim=1)
-        token_text = model.tokenizer.decode(next_token[0])
-        print(f"  Step {step}: token={next_token.item()} -> '{token_text}'")
-    full = model.tokenizer.decode(ids[0], skip_special_tokens=True)
-    print(f"  Full output: {full}")
-
-    # Test 3: LLM.generate with explicit attention_mask
-    print("\nTest 3: LLM.generate with explicit attention_mask...")
-    attn_mask = torch.ones_like(test_ids)
-    gen_out = model.llm.generate(
-        input_ids=test_ids,
-        attention_mask=attn_mask,
-        max_new_tokens=30,
-        do_sample=False,
-    )
-    decoded = model.tokenizer.decode(gen_out[0], skip_special_tokens=True)
-    print(f"  Output: {decoded[:200]}")
-
-    # Test 4: generate_content
-    print("\nTest 4: generate_content...")
+    print("\nTesting text-only inference...")
+    vram_snapshot("Before inference")
     gen_cfg = model.default_generation_config
-    gen_cfg.max_new_tokens = 50
+    gen_cfg.max_new_tokens = 100
     gen_cfg.max_length = 200
     gen_cfg.do_sample = False
     response = model.generate_content(["What is 2 + 2?"], generation_config=gen_cfg)
-    print(f"  Response: {response[:200]}")
+    vram_snapshot("After inference")
+    print(f"Response: {response[:300]}")
 
 vram_snapshot("Final")
 
