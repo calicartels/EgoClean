@@ -2,41 +2,25 @@ import sys
 import time
 import torch
 import transformers
-from tqdm import tqdm
 from transformers import AutoModel, AutoConfig, BitsAndBytesConfig
 
 MODEL_ID = "Efficient-Large-Model/LongVILA-R1-7B"
 
-# Choice: INT8 instead of NF4 (INT4).
-# Qwen2 has known activation quantization errors with bnb 4-bit that produce
-# garbage during autoregressive generation (KV cache corruption).
-# INT8 avoids this — ~8GB vs ~5GB, but generation works correctly.
+# Choice: INT8 over NF4 (INT4).
+# Qwen2 backbone has known KV cache corruption with bnb 4-bit
+# that produces garbage during autoregressive generation.
+# INT8 uses ~9.6GB vs ~5GB, but generation works correctly.
 QUANT_CONFIG = BitsAndBytesConfig(
     load_in_8bit=True,
     llm_int8_threshold=6.0,
 )
 
 
-def vram_snapshot(label):
-    if not torch.cuda.is_available():
-        print(f"[{label}] No CUDA available")
-        return None
-    torch.cuda.synchronize()
-    alloc = torch.cuda.memory_allocated() / 1e9
-    res = torch.cuda.memory_reserved() / 1e9
-    peak = torch.cuda.max_memory_allocated() / 1e9
-    total = torch.cuda.get_device_properties(0).total_memory / 1e9
-    free = total - alloc
-    print(f"[{label}] VRAM: {alloc:.2f}/{total:.1f}GB allocated, "
-          f"{res:.2f}GB reserved, {peak:.2f}GB peak, {free:.1f}GB free")
-    return alloc, res
-
-
 def patched_post_config(self_model):
     import bitsandbytes as bnb
 
     # Convert non-quantized LLM layers (embeddings, norms, lm_head) to fp16.
-    # Skip Int8 linear modules — calling .to() on them crashes in transformers 4.x.
+    # Skip Int8 linear modules — .to() on them crashes in transformers 4.x.
     for module in self_model.llm.modules():
         if isinstance(module, bnb.nn.Linear8bitLt):
             continue
@@ -57,7 +41,6 @@ def patched_post_config(self_model):
         self_model.config.vision_tower_cfg = self_model.vision_tower.config
     if getattr(self_model.config, "mm_projector_cfg", None) is None:
         self_model.config.mm_projector_cfg = self_model.mm_projector.config
-    print("  Patched post_config: converted non-quantized LLM layers to fp16")
 
 
 def find_and_patch_vila_class():
@@ -70,102 +53,64 @@ def find_and_patch_vila_class():
 
 
 def load_quantized():
-    vram_snapshot("Before loading")
-
-    print("Downloading remote code...")
+    # Phase 1: load config to trigger remote code download
     config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
 
+    # Phase 2: patch post_config on the now-imported VILAPretrainedModel
     vila_mod, original_post_config = find_and_patch_vila_class()
-    if vila_mod:
-        print("  Patched VILAPretrainedModel.post_config")
-    else:
-        print("  WARNING: could not find VILAPretrainedModel to patch")
 
+    # Phase 3: patch AutoModelForCausalLM.from_pretrained to inject quantization
     original_from_pretrained = transformers.AutoModelForCausalLM.from_pretrained
 
     def patched_from_pretrained(*args, **kwargs):
         if "quantization_config" not in kwargs:
             kwargs["quantization_config"] = QUANT_CONFIG
-            print("  Injected INT8 quantization into LLM loading")
         return original_from_pretrained(*args, **kwargs)
 
-    pbar = tqdm(total=1, desc="Loading LongVILA-R1-7B", unit="model")
     transformers.AutoModelForCausalLM.from_pretrained = patched_from_pretrained
-    try:
-        t0 = time.time()
-        model = AutoModel.from_pretrained(
-            MODEL_ID,
-            trust_remote_code=True,
-            device_map="auto",
-            torch_dtype=torch.float16,
-        )
-        elapsed = time.time() - t0
-        pbar.update(1)
-        pbar.set_postfix_str(f"done in {elapsed:.1f}s")
-        pbar.close()
-    except Exception as e:
-        pbar.close()
-        print(f"Loading failed: {e}")
-        raise
-    finally:
-        transformers.AutoModelForCausalLM.from_pretrained = original_from_pretrained
-        if vila_mod and original_post_config:
-            vila_mod.VILAPretrainedModel.post_config = original_post_config
+    t0 = time.time()
+    model = AutoModel.from_pretrained(
+        MODEL_ID,
+        trust_remote_code=True,
+        device_map="auto",
+        torch_dtype=torch.float16,
+    )
+    elapsed = time.time() - t0
+
+    transformers.AutoModelForCausalLM.from_pretrained = original_from_pretrained
+    if vila_mod and original_post_config:
+        vila_mod.VILAPretrainedModel.post_config = original_post_config
 
     print(f"Model loaded in {elapsed:.1f}s")
-    vram_snapshot("After loading")
     return model
 
 
 def verify(model):
     import bitsandbytes as bnb
 
-    total = sum(p.numel() for p in tqdm(list(model.parameters()),
-                                         desc="Counting parameters", unit="param"))
-    print(f"Total params: {total / 1e9:.2f}B")
-
+    total = sum(p.numel() for p in model.parameters())
     modules = list(model.llm.named_modules())
-    n_quant, n_regular = 0, 0
-    for _, m in tqdm(modules, desc="Checking layer types", unit="module"):
-        if isinstance(m, bnb.nn.Linear8bitLt):
-            n_quant += 1
-        elif isinstance(m, torch.nn.Linear):
-            n_regular += 1
+    n_quant = sum(1 for _, m in modules if isinstance(m, bnb.nn.Linear8bitLt))
+    n_regular = sum(1 for _, m in modules if isinstance(m, torch.nn.Linear))
 
-    print(f"LLM layers: {n_quant} quantized (Linear8bit), {n_regular} regular (Linear)")
-
-    if n_quant == 0:
-        print("WARNING: no quantized layers found, quantization may have failed")
-        return False
-    return True
+    print(f"Params: {total / 1e9:.2f}B | "
+          f"LLM: {n_quant} quantized (Linear8bit), {n_regular} regular (Linear)")
+    return n_quant > 0
 
 
-def print_vram_report(before, after):
-    if before is None or after is None:
+def vram_report():
+    if not torch.cuda.is_available():
         return
-    alloc_before, _ = before
-    alloc_after, _ = after
-    delta = alloc_after - alloc_before
-    print(f"\nVRAM Report:")
-    print(f"  Before load: {alloc_before:.2f}GB")
-    print(f"  After load:  {alloc_after:.2f}GB")
-    print(f"  Delta:       {delta:.2f}GB (model footprint)")
-    print(f"  Expected ~8-9GB for INT8, ~14GB for fp16")
+    torch.cuda.synchronize()
+    alloc = torch.cuda.memory_allocated() / 1e9
+    total = torch.cuda.get_device_properties(0).total_memory / 1e9
+    free = total - alloc
+    print(f"VRAM: {alloc:.2f}/{total:.1f}GB allocated, {free:.1f}GB free")
 
-
-print("=" * 50)
-print("LongVILA-R1-7B INT8 Quantization")
-print("=" * 50)
-
-vram_before = vram_snapshot("Baseline")
-if torch.cuda.is_available():
-    torch.cuda.reset_peak_memory_stats()
 
 model = load_quantized()
-vram_after = vram_snapshot("Post-load")
-
 ok = verify(model)
-print_vram_report(vram_before, vram_after)
+vram_report()
 
 if ok:
     gen_cfg = model.default_generation_config
@@ -179,14 +124,11 @@ if ok:
         "Describe what a typical sunset looks like in three sentences.",
     ]
 
-    for i, prompt in enumerate(prompts):
-        print(f"\nTest {i+1}: {prompt[:60]}...")
-        vram_snapshot("Before inference")
+    for prompt in prompts:
         response = model.generate_content([prompt], generation_config=gen_cfg)
-        vram_snapshot("After inference")
-        print(f"Response: {response[:300]}")
+        print(f"\n> {prompt}\n{response[:300]}")
 
-vram_snapshot("Final")
+    vram_report()
 
 # To test with video:
 # model.config.fps = 0.5
