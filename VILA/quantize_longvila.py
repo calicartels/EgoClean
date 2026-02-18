@@ -192,40 +192,45 @@ if ok:
     logits = out.logits[0, -1]
     top5 = torch.topk(logits, 5)
     print(f"  Logits stats: min={logits.min():.2f}, max={logits.max():.2f}, "
-          f"mean={logits.mean():.2f}, has_nan={logits.isnan().any()}, has_inf={logits.isinf().any()}")
+          f"has_nan={logits.isnan().any()}, has_inf={logits.isinf().any()}")
     print(f"  Top-5 next tokens:")
     for val, idx in zip(top5.values, top5.indices):
         token = model.tokenizer.decode([idx])
         print(f"    {idx.item():6d} -> '{token}' (logit={val:.2f})")
 
-    # Test 1.5: LLM.generate with input_ids (bypasses _embed entirely)
-    print("\nTest 1.5: LLM.generate with input_ids directly...")
-    gen_out = model.llm.generate(input_ids=test_ids, max_new_tokens=30, do_sample=False)
+    # Test 2: Manual autoregressive loop (no generate(), no KV cache)
+    print("\nTest 2: Manual autoregressive (5 steps, no KV cache)...")
+    ids = test_ids.clone()
+    for step in range(5):
+        with torch.no_grad():
+            out = model.llm(input_ids=ids)
+        next_token = out.logits[0, -1].argmax().unsqueeze(0).unsqueeze(0)
+        ids = torch.cat([ids, next_token], dim=1)
+        token_text = model.tokenizer.decode(next_token[0])
+        print(f"  Step {step}: token={next_token.item()} -> '{token_text}'")
+    full = model.tokenizer.decode(ids[0], skip_special_tokens=True)
+    print(f"  Full output: {full}")
+
+    # Test 3: LLM.generate with explicit attention_mask
+    print("\nTest 3: LLM.generate with explicit attention_mask...")
+    attn_mask = torch.ones_like(test_ids)
+    gen_out = model.llm.generate(
+        input_ids=test_ids,
+        attention_mask=attn_mask,
+        max_new_tokens=30,
+        do_sample=False,
+    )
     decoded = model.tokenizer.decode(gen_out[0], skip_special_tokens=True)
-    print(f"  Direct LLM output: {decoded[:200]}")
+    print(f"  Output: {decoded[:200]}")
 
-    # Test 1.6: LLM.generate with inputs_embeds (same path as generate_content)
-    print("\nTest 1.6: LLM.generate with inputs_embeds...")
-    embed_layer = model.llm.get_input_embeddings()
-    test_embeds = embed_layer(test_ids).to(torch.float16)
-    print(f"  Embed stats: dtype={test_embeds.dtype}, "
-          f"min={test_embeds.min():.4f}, max={test_embeds.max():.4f}, "
-          f"has_nan={test_embeds.isnan().any()}")
-    gen_out2 = model.llm.generate(inputs_embeds=test_embeds, max_new_tokens=30, do_sample=False)
-    decoded2 = model.tokenizer.decode(gen_out2[0], skip_special_tokens=True)
-    print(f"  Embeds-based output: {decoded2[:200]}")
-
-    # Test 2: generate_content with model's own default config
-    print("\nTest 2: generate_content with default config...")
-    vram_snapshot("Before inference")
+    # Test 4: generate_content
+    print("\nTest 4: generate_content...")
     gen_cfg = model.default_generation_config
     gen_cfg.max_new_tokens = 50
     gen_cfg.max_length = 200
     gen_cfg.do_sample = False
-    gen_cfg.repetition_penalty = 1.2
     response = model.generate_content(["What is 2 + 2?"], generation_config=gen_cfg)
-    vram_snapshot("After inference")
-    print(f"Response: {response[:200]}")
+    print(f"  Response: {response[:200]}")
 
 vram_snapshot("Final")
 
