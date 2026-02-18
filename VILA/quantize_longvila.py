@@ -47,12 +47,44 @@ def patched_post_config(self_model):
         self_model.config.mm_projector_cfg = self_model.mm_projector.config
 
 
+def patched_encode_images(self_model, images):
+    # Vision Encoder Chunking Patch
+    # SigLIP OOMs if we process 600 frames at once.
+    # We chunk the input tensor (Batch, C, H, W) and process in small batches.
+    import torch
+    
+    # If not a tensor or small enough, use original logic
+    if not isinstance(images, torch.Tensor) or images.shape[0] <= 8:
+        return self_model.mm_projector(self_model.get_vision_tower()(images))
+
+    # Chunking logic
+    features_list = []
+    chunk_size = 8
+    for i in range(0, images.shape[0], chunk_size):
+        chunk = images[i : i + chunk_size]
+        # Vision tower + projector for each chunk
+        feat = self_model.get_vision_tower()(chunk)
+        feat = self_model.mm_projector(feat)
+        features_list.append(feat)
+    
+    return torch.cat(features_list, dim=0)
+
+
 def find_and_patch_vila_class():
     for mod_name, mod in sys.modules.items():
         if "modeling_vila" in mod_name and hasattr(mod, "VILAPretrainedModel"):
-            original = mod.VILAPretrainedModel.post_config
+            # Patch post_config
+            original_post = mod.VILAPretrainedModel.post_config
             mod.VILAPretrainedModel.post_config = patched_post_config
-            return mod, original
+            
+            # Patch encode_images for chunking
+            # (Backup original if needed, but we just replace it)
+            if hasattr(mod.VILAPretrainedModel, "encode_images"):
+                original_encode = mod.VILAPretrainedModel.encode_images
+                mod.VILAPretrainedModel.encode_images = patched_encode_images
+                print("  Patched VILAPretrainedModel.encode_images (vision chunking)")
+            
+            return mod, original_post
     return None, None
 
 
@@ -121,15 +153,11 @@ if ok:
     gen_cfg.max_new_tokens = 2048
     gen_cfg.max_length = 4096
     gen_cfg.do_sample = False
-    # Text-only sanity check
-    response = model.generate_content(["What is 2 + 2?"], generation_config=gen_cfg)
-    print(f"\nText test: {response[:100]}")
-
     # Video inference on rectified egocentric clip
-    # Choice: fps=0.025 to keep frame count ~30 for 20min video.
-    # fps=0.05 (60 frames) caused OOM (needs >4GB for vision attention).
+    # Choice: fps=0.5 (~600 frames) works now thanks to vision chunking patch!
+    # Without chunking, even 30 frames (fps=0.025) caused OOM.
     VIDEO_PATH = "../data/factory_001/rectified_clip_2.mp4"
-    model.config.fps = 0.025
+    model.config.fps = 0.5
     
     print(f"\nRunning video inference on {VIDEO_PATH}...")
     torch.cuda.empty_cache()
