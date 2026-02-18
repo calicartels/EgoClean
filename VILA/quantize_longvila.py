@@ -1,8 +1,9 @@
+import sys
 import time
 import torch
 import transformers
 from tqdm import tqdm
-from transformers import AutoModel, BitsAndBytesConfig
+from transformers import AutoModel, AutoConfig, BitsAndBytesConfig
 
 MODEL_ID = "Efficient-Large-Model/LongVILA-R1-7B"
 QUANT_TYPE = "nf4"
@@ -29,19 +30,59 @@ def vram_snapshot(label):
     return alloc, res
 
 
+def patched_post_config(self_model):
+    # Only convert vision_tower and mm_projector — LLM stays quantized
+    self_model.mm_projector = self_model.mm_projector.to(torch.float16)
+    self_model.vision_tower = self_model.vision_tower.to(torch.float16)
+
+    self_model.training = self_model.llm.training
+    if self_model.training:
+        self_model.train()
+    else:
+        self_model.eval()
+    if getattr(self_model.config, "llm_cfg", None) is None:
+        self_model.config.llm_cfg = self_model.llm.config
+    if getattr(self_model.config, "vision_tower_cfg", None) is None:
+        self_model.config.vision_tower_cfg = self_model.vision_tower.config
+    if getattr(self_model.config, "mm_projector_cfg", None) is None:
+        self_model.config.mm_projector_cfg = self_model.mm_projector.config
+    print("  Patched post_config: skipped .to(float16) on quantized LLM")
+
+
+def find_and_patch_vila_class():
+    for mod_name, mod in sys.modules.items():
+        if "modeling_vila" in mod_name and hasattr(mod, "VILAPretrainedModel"):
+            original = mod.VILAPretrainedModel.post_config
+            mod.VILAPretrainedModel.post_config = patched_post_config
+            return mod, original
+    return None, None
+
+
 def load_quantized():
     vram_snapshot("Before loading")
 
-    original = transformers.AutoModelForCausalLM.from_pretrained
+    # Phase 1: Load config to trigger remote code download
+    print("Downloading remote code...")
+    config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
 
-    def patched(*args, **kwargs):
+    # Phase 2: Patch post_config on the now-imported VILAPretrainedModel
+    vila_mod, original_post_config = find_and_patch_vila_class()
+    if vila_mod:
+        print("  Patched VILAPretrainedModel.post_config")
+    else:
+        print("  WARNING: could not find VILAPretrainedModel to patch")
+
+    # Phase 3: Patch AutoModelForCausalLM.from_pretrained to inject quantization
+    original_from_pretrained = transformers.AutoModelForCausalLM.from_pretrained
+
+    def patched_from_pretrained(*args, **kwargs):
         if "quantization_config" not in kwargs:
             kwargs["quantization_config"] = QUANT_CONFIG
             print("  Injected INT4 quantization into LLM loading")
-        return original(*args, **kwargs)
+        return original_from_pretrained(*args, **kwargs)
 
     pbar = tqdm(total=1, desc="Loading LongVILA-R1-7B", unit="model")
-    transformers.AutoModelForCausalLM.from_pretrained = patched
+    transformers.AutoModelForCausalLM.from_pretrained = patched_from_pretrained
     try:
         t0 = time.time()
         model = AutoModel.from_pretrained(
@@ -59,7 +100,9 @@ def load_quantized():
         print(f"Loading failed: {e}")
         raise
     finally:
-        transformers.AutoModelForCausalLM.from_pretrained = original
+        transformers.AutoModelForCausalLM.from_pretrained = original_from_pretrained
+        if vila_mod and original_post_config:
+            vila_mod.VILAPretrainedModel.post_config = original_post_config
 
     print(f"Model loaded in {elapsed:.1f}s")
     vram_snapshot("After loading")
