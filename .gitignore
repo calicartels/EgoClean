@@ -225,3 +225,8 @@ papers/
 
 
 .DS_Store
+
+# Assets: generated outputs (large / regenerable)
+assets/*.json
+assets/*.npz
+assets/*.docx
