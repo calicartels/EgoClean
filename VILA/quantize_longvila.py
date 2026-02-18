@@ -126,10 +126,10 @@ if ok:
     print(f"\nText test: {response[:100]}")
 
     # Video inference on rectified egocentric clip
-    # Choice: fps=0.05 to keep frame count ~60 for 20min video.
-    # fps=0.1 (120 frames) caused OOM (needs >8GB for vision activations).
+    # Choice: fps=0.025 to keep frame count ~30 for 20min video.
+    # fps=0.05 (60 frames) caused OOM (needs >4GB for vision attention).
     VIDEO_PATH = "../data/factory_001/rectified_clip_2.mp4"
-    model.config.fps = 0.05
+    model.config.fps = 0.025
     
     print(f"\nRunning video inference on {VIDEO_PATH}...")
     torch.cuda.empty_cache()
