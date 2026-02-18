@@ -118,6 +118,14 @@ def load_quantized():
         vila_mod.VILAPretrainedModel.post_config = original_post_config
 
     print(f"Model loaded in {elapsed:.1f}s")
+
+    # Instance-level patch to ensure chunking is used
+    # Class-level patching can be tricky with inheritance/shadowing
+    import types
+    if hasattr(model, "encode_images"):
+        model.encode_images = types.MethodType(patched_encode_images, model)
+        print("Patched model.encode_images (vision chunking enabled)")
+
     return model
 
 
