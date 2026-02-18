@@ -170,11 +170,42 @@ ok = verify(model)
 print_vram_report(vram_before, vram_after)
 
 if ok:
-    from transformers import GenerationConfig
-    gen_cfg = GenerationConfig(max_new_tokens=100, do_sample=False, repetition_penalty=1.2)
+    # Diagnostics: print dtypes of key layers
+    print("\nDtype diagnostics:")
+    emb = model.llm.get_input_embeddings()
+    print(f"  Embedding weight dtype: {emb.weight.dtype}")
+    lm_head = model.llm.get_output_embeddings()
+    if lm_head is not None:
+        print(f"  LM head weight dtype: {lm_head.weight.dtype}")
 
-    print("\nTesting text-only inference...")
+    # Check first layer norm dtype
+    for name, param in model.llm.named_parameters():
+        if "norm" in name.lower() or "layernorm" in name.lower():
+            print(f"  {name}: {param.dtype}")
+            break
+
+    # Test 1: raw LLM forward pass to check logits sanity
+    print("\nTest 1: Raw LLM forward pass...")
+    test_ids = model.tokenizer("What is 2 + 2? The answer is", return_tensors="pt").input_ids.cuda()
+    with torch.no_grad():
+        out = model.llm(input_ids=test_ids)
+    logits = out.logits[0, -1]
+    top5 = torch.topk(logits, 5)
+    print(f"  Logits stats: min={logits.min():.2f}, max={logits.max():.2f}, "
+          f"mean={logits.mean():.2f}, has_nan={logits.isnan().any()}, has_inf={logits.isinf().any()}")
+    print(f"  Top-5 next tokens:")
+    for val, idx in zip(top5.values, top5.indices):
+        token = model.tokenizer.decode([idx])
+        print(f"    {idx.item():6d} -> '{token}' (logit={val:.2f})")
+
+    # Test 2: generate_content with model's own default config + max_new_tokens cap
+    print("\nTest 2: generate_content with default config...")
     vram_snapshot("Before inference")
+    gen_cfg = model.default_generation_config
+    gen_cfg.max_new_tokens = 50
+    gen_cfg.max_length = 200
+    gen_cfg.do_sample = False
+    gen_cfg.repetition_penalty = 1.2
     response = model.generate_content(["What is 2 + 2?"], generation_config=gen_cfg)
     vram_snapshot("After inference")
     print(f"Response: {response[:200]}")
