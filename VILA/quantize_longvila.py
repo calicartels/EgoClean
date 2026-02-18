@@ -1,8 +1,12 @@
 import sys
 import time
+import os
 import torch
 import transformers
 from transformers import AutoModel, AutoConfig, BitsAndBytesConfig
+
+# Help with memory fragmentation
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 MODEL_ID = "Efficient-Large-Model/LongVILA-R1-7B"
 
@@ -122,12 +126,15 @@ if ok:
     print(f"\nText test: {response[:100]}")
 
     # Video inference on rectified egocentric clip
-    # Choice: fps=0.1 to keep frame count ~120 for 20min video.
-    # fps=0.5 (600 frames) causes OOM in SigLIP vision encoder.
+    # Choice: fps=0.05 to keep frame count ~60 for 20min video.
+    # fps=0.1 (120 frames) caused OOM (needs >8GB for vision activations).
     VIDEO_PATH = "../data/factory_001/rectified_clip_2.mp4"
-    model.config.fps = 0.1
+    model.config.fps = 0.05
+    
     print(f"\nRunning video inference on {VIDEO_PATH}...")
+    torch.cuda.empty_cache()
     vram_report()
+    
     response = model.generate_content(
         [
             "Watch this egocentric video carefully. "
