@@ -161,7 +161,7 @@ print_vram_report(vram_before, vram_after)
 
 if ok:
     from transformers import GenerationConfig
-    gen_cfg = GenerationConfig(max_new_tokens=100, do_sample=False)
+    gen_cfg = GenerationConfig(max_new_tokens=100, do_sample=False, repetition_penalty=1.2)
 
     print("\nTesting text-only inference...")
     vram_snapshot("Before inference")
